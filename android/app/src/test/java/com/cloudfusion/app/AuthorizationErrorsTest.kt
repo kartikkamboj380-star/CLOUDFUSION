@@ -4,6 +4,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AuthorizationErrorsTest {
+    @Test fun internalErrorDoesNotPretendToDiagnoseOrFixOAuthConfiguration() {
+        val message = googleAuthorizationError(8)
+        assertTrue(message.contains("internal authorization error (code 8)"))
+        assertTrue(message.contains("does not identify the cause"))
+        assertTrue(message.contains("existing Android OAuth client"))
+        assertTrue(message.contains("Do not create a new project or remove accounts"))
+    }
     @Test fun developerErrorPointsToInstalledCertificate() {
         assertTrue(googleAuthorizationError(10).contains("installed APK"))
         assertTrue(googleAuthorizationError(10).contains("SHA-1"))
