@@ -12,9 +12,9 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Account identifiers and resumable session URLs are encrypted; access tokens are never saved here. */
-class LocalStore(private val context: Context) {
-    private val prefs = context.getSharedPreferences("direct_drive_v1", Context.MODE_PRIVATE)
-    private val alias = "cloudfusion.direct.state.v1"
+class LocalStore(private val context: Context, namespace: String = "direct_drive_v1") {
+    private val prefs = context.getSharedPreferences(namespace, Context.MODE_PRIVATE)
+    private val alias = if (namespace == "direct_drive_v1") "cloudfusion.direct.state.v1" else "cloudfusion.$namespace.state.v1"
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

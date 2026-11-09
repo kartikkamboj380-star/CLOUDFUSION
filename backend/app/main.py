@@ -380,3 +380,7 @@ def download_file(account_id: str, file_id: str, user: User = Depends(current_us
     headers = {"Content-Length": str(size), "Content-Disposition": "attachment; filename*=UTF-8''" + quote(t.name, safe=""),
                "X-Transfer-Id": t.id}
     return StreamingResponse(_download_stream(user.id, t.id), media_type="application/octet-stream", headers=headers)
+
+
+from .remote_downloads import router as remote_router
+app.include_router(remote_router)

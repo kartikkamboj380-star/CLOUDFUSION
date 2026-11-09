@@ -135,7 +135,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     fun clearMessages() { error = null; notice = null }
     fun showError(message: String) { error = message }
     private fun displayError(e: Exception): String = when (e) {
-        is ApiException -> "Google Play services authorization failed (code ${e.statusCode}). Check the Android OAuth package, signing SHA-1, Drive API and test-user setup."
+        is ApiException -> googleAuthorizationError(e.statusCode)
         is IOException -> "Network or file I/O failed. Resume later and check Drive before starting a replacement."
         else -> e.message ?: "Something went wrong. Please try again."
     }

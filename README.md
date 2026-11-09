@@ -2,7 +2,17 @@
 
 CloudFusion is an Android-first **virtual view** of multiple Google Drive accounts. Google accounts and their storage are not merged; each file stays in one ordinary Drive account. Quotas and file metadata come from Google rather than fixed or sample values.
 
-## Android: no CloudFusion backend
+## 0.3.0 update: optional server URL downloads
+
+A new **Settings → URL to cloud · Server downloads** workspace streams direct HTTP/HTTPS
+files from a deployed backend to Google Drive without staging file bytes on the phone.
+It has a separate backend login/Google connection, real task status and pause/resume/cancel.
+The existing direct-Drive mode remains backend-free. **No backend is hosted by this repository.**
+This is a partial implementation increment, not the complete production product or a claim
+of live Google verification. See [feature status, phone installation, signing limitations,
+API, deployment and tests](docs/server-downloads.md) before installing/deploying.
+
+## Android: no CloudFusion backend (existing direct mode)
 
 The Android app connects **directly to Google Drive** using Google Play services. There is no backend URL, separate CloudFusion email/password, or self-hosted server to run for Android. **The APK still requires Google Cloud OAuth configuration before Google account access will work.** See [Android Google OAuth setup](docs/google-oauth.md#android-direct-google-drive) and the exact signing fingerprint instructions below.
 

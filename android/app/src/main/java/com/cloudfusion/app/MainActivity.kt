@@ -333,11 +333,17 @@ private fun installedCertificateSha1(context: Context): String? = try {
 
 @Composable
 private fun SettingsScreen() {
+    var remote by remember { mutableStateOf(false) }
+    if (remote) {
+        RemoteDownloadsScreen(onBack = { remote = false })
+        return
+    }
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val fingerprint = remember(context) { installedCertificateSha1(context) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ScreenHeader("Settings", "Your CloudFusion workspace")
+        Button(onClick = { remote = true }, modifier = Modifier.fillMaxWidth()) { Text("URL to cloud · Server downloads") }
         Panel(Modifier.fillMaxWidth()) {
             Text("Direct to Google Drive", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))

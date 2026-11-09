@@ -11,9 +11,21 @@ android {
         applicationId = "com.cloudfusion.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    val stableKeystore = System.getenv("CLOUDFUSION_KEYSTORE")
+    if (!stableKeystore.isNullOrBlank()) {
+        signingConfigs {
+            create("stable") {
+                storeFile = file(stableKeystore)
+                storePassword = System.getenv("CLOUDFUSION_STORE_PASSWORD")
+                keyAlias = System.getenv("CLOUDFUSION_KEY_ALIAS")
+                keyPassword = System.getenv("CLOUDFUSION_KEY_PASSWORD")
+            }
+        }
+        buildTypes.getByName("debug").signingConfig = signingConfigs.getByName("stable")
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {

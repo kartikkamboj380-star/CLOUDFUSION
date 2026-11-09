@@ -53,3 +53,34 @@ If the app says consent did not finish (older APKs always said “Google authori
 3. Check the consent audience/test-user list and device Google Play services. Retry, and share the exact displayed status code or a redacted screenshot. Never share tokens or passwords.
 
 This diagnostic change does not bypass consent or guarantee that a Google Cloud configuration is correct. Real-device verification is still required.
+
+## 0.3.0 checklist: distinguish the two OAuth paths
+
+| Check | Direct Android mode | Optional server downloads |
+|---|---|---|
+| Debug SHA-1 | actual installed APK Settings/artifact | not used by browser Web client |
+| Release SHA-1 | actual release/Play signing certificate | not used by browser Web client |
+| Client type | Android, `com.cloudfusion.app` + certificate | Web application |
+| Client ID | Google Play services resolves Android configuration | `GOOGLE_CLIENT_ID` on backend |
+| Client secret | none in APK | `GOOGLE_CLIENT_SECRET`, server only |
+| Redirect | Play services resolution | exact HTTPS `GOOGLE_REDIRECT_URI` + registered Web callback |
+| Drive API/project | enabled in client-owning project | enabled in Web-client-owning project |
+| Audience | internal or external as appropriate | internal or external as appropriate |
+| Testing | all connecting accounts listed as test users | all connecting accounts listed as test users |
+| Refresh | Play services cache, short-lived token in app memory | encrypted offline refresh token, invalid grant → reconnect |
+
+Owner console links (labels may change):
+- [Enable Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com)
+- [OAuth clients](https://console.cloud.google.com/auth/clients)
+- [Audience and test users](https://console.cloud.google.com/auth/audience)
+- [Consent branding](https://console.cloud.google.com/auth/branding)
+- [Requested scopes](https://console.cloud.google.com/auth/scopes)
+
+For `403 access_denied`, check test users, administrator policy and denied scope. An invalid
+client/wrong package/SHA-1 needs the matching client configuration, not another secret in the
+APK. `redirect_uri_mismatch` concerns the Web client's exact callback. API-disabled failures
+require enabling Drive in the client-owning project. Expired/revoked server refresh tokens
+require Reconnect; network failures require connectivity/retry, not new credentials.
+The app cannot inspect private Google Cloud settings to verify them automatically.
+Testing does not require publishing publicly; public restricted-scope distribution may need
+Google review. None of this repository's mocked tests proves that review or live login.

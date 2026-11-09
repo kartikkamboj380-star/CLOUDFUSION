@@ -1,6 +1,6 @@
 # Deployment, operations and security
 
-The Android app is now a direct Google Drive client and does **not** need this backend deployment. The configuration, HTTPS and operational sections below apply only to the optional legacy backend and web companion. Android setup is described in [Google OAuth setup](google-oauth.md#android-direct-google-drive).
+The existing direct Android mode does **not** need this backend deployment. The new optional URL-to-cloud workspace **does** need it; see [server downloads](server-downloads.md). The configuration, HTTPS and operational sections below apply only to the optional legacy backend and web companion. Android setup is described in [Google OAuth setup](google-oauth.md#android-direct-google-drive).
 
 ## Configuration
 
@@ -18,7 +18,7 @@ cloud.example.com {
 }
 ```
 
-Set `GOOGLE_REDIRECT_URI=https://cloud.example.com/api/oauth/callback` and register the exact URI with Google. Ensure the proxy supports long-lived streaming responses and uploads, does not buffer entire files, and sets appropriate request/time limits. The supplied nginx proxy accepts at most 9 MiB per chunk and disables proxy buffering; it is not a substitute for a hardened public edge. The direct Android app does not connect to this origin and disallows cleartext traffic.
+Set `GOOGLE_REDIRECT_URI=https://cloud.example.com/api/oauth/callback` and register the exact URI with Google. Ensure the proxy supports long-lived streaming responses and uploads, does not buffer entire files, and sets appropriate request/time limits. The supplied nginx proxy accepts at most 9 MiB per chunk and disables proxy buffering; it is not a substitute for a hardened public edge. The direct mode does not connect to this origin; the optional server workspace does. Both disallow cleartext backend traffic.
 
 ## Operational constraints
 
@@ -34,3 +34,5 @@ Set `GOOGLE_REDIRECT_URI=https://cloud.example.com/api/oauth/callback` and regis
 The Android workflow installs JDK 17 and SDK 35, runs unit tests, assembles a debug APK and extracts its **public** signing certificate fingerprints using `apksigner`. The successful `CloudFusion-debug-apk` artifact includes the APK and `signing-certificate.txt` for 14 days. Register the **SHA-1 of that exact APK** with an Android OAuth client (`com.cloudfusion.app`). GitHub-hosted debug jobs normally create a new key per run; a new APK can have a different fingerprint and cannot update an app signed with a different key. Uninstalling an old debug app removes its local state but not Drive files. See [Android OAuth setup](google-oauth.md#android-direct-google-drive).
 
 The debug key is for testing only. There is currently **no signed release workflow**. Generate and keep a release keystore outside git, protect it and its passwords/alias as secrets, and use a trusted release pipeline with appropriate Play App Signing. Never expose secrets to pull requests from untrusted forks or commit signing material. Google restricted-scope verification and real-device testing remain separate prerequisites for public distribution.
+
+Stable test signing and the new artifact provenance file are described in [server downloads](server-downloads.md#phone-only-installation--signing). Android CI now also runs `lintDebug`.

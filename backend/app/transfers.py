@@ -23,7 +23,7 @@ CHUNK_SIZE = 4 * 1024 * 1024  # A multiple of Drive's 256 KiB requirement.
 _reservation_lock = threading.RLock()
 _locks_guard = threading.Lock()
 _locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
-ACTIVE = ("initializing", "pending", "in_progress", "cancel_requested")
+ACTIVE = ("initializing", "pending", "in_progress", "cancel_requested", "paused")
 
 
 @contextmanager
@@ -209,10 +209,10 @@ def _apply_result(db: Session, transfer: Transfer, result: dict) -> None:
             refresh_account(db, destination)
 
 
-def put_chunk(db: Session, user_id: str, transfer_id: str, offset: int, chunk: bytes, *, allow_copy: bool = False) -> Transfer:
+def put_chunk(db: Session, user_id: str, transfer_id: str, offset: int, chunk: bytes, *, allow_copy: bool = False, allow_remote: bool = False) -> Transfer:
     with transfer_lock(transfer_id):
         transfer = owned_transfer(db, user_id, transfer_id, lock=True)
-        if transfer.kind not in (("upload", "copy") if allow_copy else ("upload",)):
+        if transfer.kind not in (("remote",) if allow_remote else (("upload", "copy") if allow_copy else ("upload",))):
             raise HTTPException(400, "Transfer does not accept upload chunks")
         if transfer.status == "completed":
             return transfer
@@ -371,6 +371,10 @@ def recover_interrupted() -> None:
         cutoff = utcnow() - timedelta(days=7)
         transfers = db.scalars(select(Transfer).where(Transfer.status.in_(ACTIVE))).all()
         for t in transfers:
+            if t.kind == "remote":
+                t.status = "paused"
+                t.error = "Server restarted; explicitly resume to reconcile the Drive session"
+                continue
             if t.kind in ("copy", "download") or t.status == "initializing" or t.created_at < cutoff:
                 t.status = "failed"
                 t.error = "Server restarted or upload session expired; retry if the session is still valid"

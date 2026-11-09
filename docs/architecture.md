@@ -31,3 +31,14 @@ This separate architecture is retained for the web companion; the new Android cl
 The server indexes Drive metadata on `POST /api/files/sync` in bounded pages. Search/filter/sort/offset pagination operate on the last index, and a failed account refresh retains prior indexed rows. It refreshes quotas, locks candidate account rows and subtracts reservations for active server uploads. Reservations are not shared with the direct Android client or other external Drive activity.
 
 The optional backend mediates web uploads and downloads and streams cross-account copies in 4 MiB chunks through the server, not through the web browser. Session URLs are encrypted server-side. Native Workspace files/folders and empty files are not supported for server-side copies; when both sides supply MD5 the checksums are compared. Web downloads require the File System Access API and check byte counts, not MD5. The service uses a single API worker and in-process copy tasks, not a durable queue: a restart marks interrupted copies failed and releases reservations. Retry while the Google session remains valid; check the destination before starting a replacement if completion is ambiguous. See [deployment](deployment.md).
+
+
+## Optional URL-to-cloud server workspace (0.3.0)
+
+Android JSON client → authenticated FastAPI remote-download API → pinned public HTTP source
+→ bounded 4 MiB buffer → existing Google resumable upload adapter. File bytes do not transit
+Android or a backend staging file. Encrypted source URL/ETag/source digest reference the
+existing transfer record via additive `remote_sources` migration. One in-process remote worker,
+20 retained queued/paused/failed task limit, explicitly paused on restart; not a distributed
+job system. Existing direct account/token/session state is separate from server authorization.
+See [the implementation/status document](server-downloads.md) for exact limits and missing work.

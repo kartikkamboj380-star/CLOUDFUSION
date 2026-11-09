@@ -24,11 +24,26 @@ jobs:
         run: |
           test -n "$ANDROID_HOME"
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Restore stable test signing key when configured
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/cloudfusion-signing.jks"
+            echo "CLOUDFUSION_KEYSTORE=$RUNNER_TEMP/cloudfusion-signing.jks" >> "$GITHUB_ENV"
+          else
+            echo "No stable signing key configured; this debug APK may NOT update an installed build." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Test and assemble debug APK
+        env:
+          CLOUDFUSION_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CLOUDFUSION_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CLOUDFUSION_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
           set +e
-          ./gradlew --no-daemon --console plain testDebugUnitTest assembleDebug 2>&1 | tee gradle-build.log
+          ./gradlew --no-daemon --console plain testDebugUnitTest lintDebug assembleDebug 2>&1 | tee gradle-build.log
           result=${PIPESTATUS[0]}
           if [ "$result" -ne 0 ]; then
             # Surface compiler diagnostics as check annotations as well as in the full log.
@@ -40,6 +55,9 @@ jobs:
         run: |
           set -o pipefail
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee app/build/outputs/apk/debug/signing-certificate.txt
+          package=$("$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" manifest application-id app/build/outputs/apk/debug/app-debug.apk)
+          test "$package" = "com.cloudfusion.app"
+          printf 'commit=%s\npackage=%s\nvariant=debug\n' "$GITHUB_SHA" "$package" > app/build/outputs/apk/debug/build-info.txt
           sha1=$(sed -n 's/^Signer #1 certificate SHA-1 digest: //p' app/build/outputs/apk/debug/signing-certificate.txt | head -n 1)
           test -n "$sha1"
           formatted=$(echo "$sha1" | sed 's/../&:/g; s/:$//' | tr '[:lower:]' '[:upper:]')
@@ -53,5 +71,6 @@ jobs:
           path: |
             android/app/build/outputs/apk/debug/app-debug.apk
             android/app/build/outputs/apk/debug/signing-certificate.txt
+            android/app/build/outputs/apk/debug/build-info.txt
           if-no-files-found: error
           retention-days: 14

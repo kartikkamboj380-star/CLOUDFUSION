@@ -98,3 +98,11 @@ class Transfer(Base):
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[object] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[object] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class RemoteSource(Base):
+    __tablename__ = "remote_sources"
+    transfer_id: Mapped[str] = mapped_column(ForeignKey("transfers.id", ondelete="CASCADE"), primary_key=True)
+    url_enc: Mapped[str] = mapped_column(Text)
+    etag: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
