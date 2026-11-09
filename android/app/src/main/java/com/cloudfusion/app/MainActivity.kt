@@ -123,8 +123,8 @@ fun CloudFusionApp(vm: CloudViewModel = viewModel()) {
                 1 -> FilesScreen(vm)
                 2 -> TransfersScreen(vm)
                 3 -> AccountsScreen(vm, chooseAccount)
-                4 -> SettingsScreen()
-                5 -> RemoteDownloadsScreen(onBack = { tab = 0 })
+                4 -> SettingsScreen(vm, onAccounts = { tab = 3 })
+                5 -> DirectDownloadScreen(vm, onBack = { tab = 0 }, onAccounts = { tab = 3 })
             }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter), color = Mint)
         }
@@ -197,7 +197,7 @@ private fun HomeScreen(vm: CloudViewModel, onAccounts: () -> Unit, onFiles: () -
             Button(onClick = onRemote, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Default.Link, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Paste download link · Server to cloud")
+                Text("Direct Download · Paste link")
             }
         }
         item {
@@ -340,10 +340,10 @@ private fun installedCertificateSha1(context: Context): String? = try {
 } catch (_: Exception) { null }
 
 @Composable
-private fun SettingsScreen() {
+private fun SettingsScreen(vm: CloudViewModel, onAccounts: () -> Unit) {
     var remote by remember { mutableStateOf(false) }
     if (remote) {
-        RemoteDownloadsScreen(onBack = { remote = false })
+        DirectDownloadScreen(vm, onBack = { remote = false }, onAccounts = onAccounts)
         return
     }
     val context = LocalContext.current
@@ -351,7 +351,7 @@ private fun SettingsScreen() {
     val fingerprint = remember(context) { installedCertificateSha1(context) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ScreenHeader("Settings", "Your CloudFusion workspace")
-        Button(onClick = { remote = true }, modifier = Modifier.fillMaxWidth()) { Text("URL to cloud · Server downloads") }
+        Button(onClick = { remote = true }, modifier = Modifier.fillMaxWidth()) { Text("Direct Download · URL to Drive") }
         Panel(Modifier.fillMaxWidth()) {
             Text("Direct to Google Drive", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
@@ -615,8 +615,10 @@ private fun TransfersScreen(vm: CloudViewModel) {
                 if (t.optBoolean("checksum_verified")) Text("Checksum verified", color = Mint, fontSize = 12.sp)
                 val status = t.optString("status"); val kind = t.optString("kind")
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (status in listOf("pending", "hashing", "in_progress", "failed", "interrupted")) TextButton(onClick = { vm.cancelTransfer(t.getString("id")) }) { Text("Cancel") }
+                    if (status in listOf("pending", "hashing", "in_progress", "failed", "interrupted", "paused")) TextButton(onClick = { vm.cancelTransfer(t.getString("id")) }) { Text("Cancel") }
                     if (kind == "upload" && status in listOf("failed", "interrupted") && !t.optBoolean("resume_blocked")) TextButton(onClick = { resume = t; picker.launch(arrayOf("*/*")) }) { Text("Resume with file") }
+                    if (kind == "url" && status in listOf("pending", "in_progress")) TextButton(onClick = { vm.pauseUrlTransfer(t.getString("id")) }) { Text("Pause") }
+                    if (kind == "url" && status in listOf("paused", "failed", "interrupted") && !t.optBoolean("resume_blocked")) TextButton(onClick = { vm.retryTransfer(t) }) { Text("Resume URL") }
                     if (kind == "copy" && status in listOf("failed", "interrupted") && !t.optBoolean("resume_blocked")) TextButton(onClick = { vm.retryTransfer(t) }) { Text("Resume copy") }
                 }
             }

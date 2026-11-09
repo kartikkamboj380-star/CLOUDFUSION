@@ -54,6 +54,9 @@ private class ReconnectRequired(email: String) : Exception("Reconnect $email in 
 class CloudViewModel(application: Application) : AndroidViewModel(application) {
     private val store = LocalStore(application)
     private val drive = DriveClient()
+    private val urlSources = UrlSourceClient()
+    var urlPreview by mutableStateOf<UrlSource?>(null); private set
+    var urlRates by mutableStateOf<String?>(null); private set
     private val authorization = Identity.getAuthorizationClient(application)
     // Short-lived OAuth tokens are memory-only; Google Play services manages its own cache.
     private val tokens = mutableMapOf<String, String>()
@@ -273,7 +276,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
             accounts = accounts.filterNot { it.optString("id") == id }
             transfers = transfers.map { t ->
                 if (t.optString("source_account_id") == id || t.optString("destination_account_id") == id) {
-                    if (t.optString("status") in listOf("failed", "interrupted", "pending", "in_progress")) {
+                    if (t.optString("status") in listOf("failed", "interrupted", "pending", "in_progress", "paused")) {
                         JSONObject(t.toString()).put("status", "review_required").put("resume_blocked", true)
                             .put("error", "Account disconnected; inspect Drive before starting a replacement.").also { it.remove("session_url") }
                     } else t
@@ -448,6 +451,63 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
         transfers = listOf(t) + transfers; persist(); updateDashboard(); startTransfer(t.getString("id"))
     }
 
+    fun inspectUrl(value: String) = launch {
+        urlPreview = null
+        urlPreview = withContext(Dispatchers.IO) { urlSources.inspect(value.trim()) }
+    }
+
+    fun startUrlTransfer(value: String, destination: String, connections: Int, bufferBytes: Int) = launch {
+        check(transferJob?.isCompleted != false) { "A transfer is already running on this device." }
+        val source = urlPreview ?: throw IllegalStateException("Preview this URL first.")
+        check(source.url == value.trim()) { "The URL changed. Preview it again before starting." }
+        require(connections in 1..50)
+        refreshAccountsNow()
+        check(chooseDestination(accounts.map(::quota), source.size, destination) != null) { "Selected account quota is unknown or has insufficient space. Refresh or reconnect in Accounts." }
+        check(transferJob?.isCompleted != false) { "A transfer is already running on this device." }
+        val t = JSONObject().put("id", UUID.randomUUID().toString()).put("kind", "url")
+            .put("name", source.name).put("size", source.size).put("mime_type", source.mime)
+            .put("destination_account_id", destination).put("url_source", source.json())
+            .put("connections", connections).put("buffer_bytes", bufferBytes)
+            .put("bytes_transferred", 0).put("status", "pending")
+        transfers = listOf(t) + transfers
+        persist(); updateDashboard(); urlPreview = null
+        startTransfer(t.getString("id"))
+    }
+
+    fun pauseUrlTransfer(id: String) {
+        val t = transfers.firstOrNull { it.optString("id") == id } ?: return
+        if (t.optString("kind") != "url" || t.optString("status") !in listOf("pending", "in_progress")) return
+        if (activeTransferId == id) transferJob?.cancel()
+        try {
+            changeTransfer(id) { it.put("status", "paused").put("error", "Paused on this device. In-flight requests may finish; resume probes Google's committed offset.") }
+        } catch (e: Exception) { error = displayError(e) }
+    }
+
+    private suspend fun runUrlTransfer(id: String) {
+        val t = transfer(id)
+        val source = UrlSource.fromJson(t.getJSONObject("url_source"))
+        val destination = t.getString("destination_account_id")
+        changeTransfer(id) { it.put("status", "in_progress").remove("error") }
+        val result = UrlTransferEngine(urlSources).run(source, t.text("session_url"), t.optInt("connections", 1),
+            t.optInt("buffer_bytes", 1024 * 1024), object : UrlUploadTarget {
+                override suspend fun create(source: UrlSource) = withDrive(destination) { drive.startUpload(it, source.name, source.mime, source.size) }
+                override suspend fun probe(session: String, size: Long) = withDrive(destination) { drive.probeUpload(it, session, size) }
+                override suspend fun send(session: String, offset: Long, source: UrlSource, bytes: ByteArray) =
+                    withDrive(destination) { drive.sendChunk(it, session, offset, source.size, source.mime, bytes) }
+            }, checkpoint = { state ->
+                coroutineContext.ensureActive()
+                changeTransfer(id) {
+                    it.put("session_url", state.session).put("bytes_transferred", state.offset)
+                    state.md5?.let { digest -> it.put("expected_md5", digest) }
+                    state.sha256?.let { digest -> it.put("expected_sha256", digest) }
+                }
+                transferProgress = "URL → Drive · ${source.name} · ${formatBytes(state.offset)} / ${formatBytes(source.size)}"
+            }, rates = { down, up, effective ->
+                urlRates = "Download ${formatBytes(down)}/s · Upload ${formatBytes(up)}/s · $effective source connection(s)"
+            })
+        finishTransfer(id, result)
+    }
+
     private fun transfer(id: String): JSONObject = transfers.firstOrNull { it.optString("id") == id }
         ?: throw IllegalStateException("Transfer not found.")
     private fun changeTransfer(id: String, change: (JSONObject) -> Unit) {
@@ -466,12 +526,12 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun retryTransfer(t: JSONObject) {
         if (t.optBoolean("resume_blocked")) { error = "Review the destination in Drive before starting a replacement."; return }
-        if (t.optString("kind") == "copy") startTransfer(t.getString("id")) else resumeUpload(t)
+        if (t.optString("kind") in listOf("copy", "url")) startTransfer(t.getString("id")) else resumeUpload(t)
     }
 
     fun cancelTransfer(id: String) {
         val t = transfers.firstOrNull { it.optString("id") == id } ?: return
-        if (t.optString("status") !in listOf("pending", "hashing", "in_progress", "failed", "interrupted")) return
+        if (t.optString("status") !in listOf("pending", "hashing", "in_progress", "failed", "interrupted", "paused")) return
         if (activeTransferId == id) transferJob?.cancel()
         try {
             changeTransfer(id) { it.put("status", "cancelled").put("resume_blocked", true).put("error", "Stopped on this phone. An in-flight request may still have completed; check Drive."); it.remove("session_url") }
@@ -482,13 +542,14 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     private fun startTransfer(id: String, selectedUri: Uri? = null) {
         if (transferJob?.isCompleted == false) { error = "A transfer is already running on this device."; return }
         activeTransferId = id
+        urlRates = null
         transferJob = viewModelScope.launch {
             try {
                 runTransfer(id, selectedUri)
             } catch (_: CancellationException) {
                 // cancelTransfer records the state. Process death is detected at next launch.
             } catch (e: Exception) {
-                if (transfer(id).optString("status") == "cancelled") return@launch
+                if (transfer(id).optString("status") in listOf("cancelled", "paused")) return@launch
                 val blocked = e is DriveException && e.code in listOf(404, 410)
                 try {
                     changeTransfer(id) {
@@ -546,6 +607,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun runTransfer(id: String, selectedUri: Uri?) {
         var t = transfer(id)
+        if (t.optString("kind") == "url") { runUrlTransfer(id); return }
         val kind = t.getString("kind"); val size = t.getLong("size"); val destination = t.getString("destination_account_id")
         require(size in 1..MAX_TRANSFER_SIZE)
         val uri = if (kind == "upload") selectedUri ?: t.text("source_uri")?.let(Uri::parse) else null
@@ -617,17 +679,23 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     private fun finishTransfer(id: String, result: JSONObject) {
         val t = transfer(id); val size = t.getLong("size"); val expected = t.text("expected_md5")
         val actual = result.text("md5Checksum"); val actualSize = result.longOrNull("size")
-        val integrity = completionIntegrity(size, actualSize, expected, actual)
+        check(result.text("id") != null) { "Google did not return a completed file ID. Check Drive before restarting." }
+        val expectedSha = t.text("expected_sha256")
+        val actualSha = result.text("sha256Checksum")
+        val integrity = if (expectedSha != null && actualSha != null) {
+            if ((actualSize != null && actualSize != size) || !expectedSha.equals(actualSha, true)) CompletionIntegrity.MISMATCH else CompletionIntegrity.VERIFIED
+        } else completionIntegrity(size, actualSize, expected, actual)
+        val algorithm = if (expectedSha != null && actualSha != null) "SHA-256" else "MD5"
         changeTransfer(id) {
             it.put("bytes_transferred", size).put("result_file_id", result.optString("id"))
-            it.put("checksum_verified", integrity == CompletionIntegrity.VERIFIED)
+            it.put("checksum_verified", integrity == CompletionIntegrity.VERIFIED).put("checksum_algorithm", algorithm)
             it.put("status", if (integrity == CompletionIntegrity.MISMATCH) "review_required" else "completed")
             it.put("resume_blocked", true).remove("session_url")
             if (integrity == CompletionIntegrity.MISMATCH) it.put("error", "Destination size or checksum differs. The file may exist in Drive; review it manually.") else it.remove("error")
         }
         notice = when (integrity) {
             CompletionIntegrity.MISMATCH -> "Transfer finished with a mismatch. Review the destination file in Drive."
-            CompletionIntegrity.VERIFIED -> "Transfer complete. MD5 checksum verified."
+            CompletionIntegrity.VERIFIED -> "Transfer complete. $algorithm checksum verified."
             CompletionIntegrity.UNVERIFIED -> "Transfer complete. Google did not return a checksum; verify the destination."
         }
         loadFiles()
@@ -675,7 +743,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
                 notice = if (expected != null) "Download complete. MD5 checksum verified." else "Download complete. Google did not provide a checksum."
             } catch (_: CancellationException) { }
             catch (e: Exception) {
-                if (transfer(id).optString("status") == "cancelled") return@launch
+                if (transfer(id).optString("status") in listOf("cancelled", "paused")) return@launch
                 try { changeTransfer(id) { it.put("status", "failed").put("error", "${displayError(e)} A partial local file may remain.") } } catch (_: Exception) { }
                 error = "${displayError(e)} A partial local file may remain."
             } finally { activeTransferId = null; transferProgress = null }

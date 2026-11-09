@@ -48,7 +48,7 @@ class DriveClient internal constructor(
         .followRedirects(false).followSslRedirects(false).build()
 ) {
     companion object {
-        private const val FILE_FIELDS = "id,name,mimeType,size,md5Checksum,modifiedTime,version,parents,webViewLink,owners(emailAddress,displayName)"
+        private const val FILE_FIELDS = "id,name,mimeType,size,md5Checksum,sha256Checksum,modifiedTime,version,parents,webViewLink,owners(emailAddress,displayName)"
         fun isTrustedGoogleSession(url: HttpUrl): Boolean = url.scheme == "https" && url.port == 443 &&
             url.username.isEmpty() && url.password.isEmpty() &&
             url.host in setOf("www.googleapis.com", "content.googleapis.com", "upload.googleapis.com") &&
@@ -157,7 +157,7 @@ class DriveClient internal constructor(
     fun startUpload(token: String, name: String, mime: String, total: Long): String {
         require(total in 1..MAX_TRANSFER_SIZE) { "Choose a non-empty file of up to 5 TiB." }
         val target = url("upload", "drive", "v3", "files").addQueryParameter("uploadType", "resumable")
-            .addQueryParameter("fields", "id,name,size,md5Checksum,webViewLink")
+            .addQueryParameter("fields", "id,name,size,md5Checksum,sha256Checksum,webViewLink")
             .addQueryParameter("supportsAllDrives", "true").build()
         val body = JSONObject().put("name", name).put("mimeType", mime)
         return checked(authorized(token, target).header("X-Upload-Content-Type", mime)
