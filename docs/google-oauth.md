@@ -43,3 +43,13 @@ The optional backend is a confidential **Web application** OAuth client. It stor
 4. Sign in to the optional web companion's CloudFusion account, choose **Connect Google account**, complete consent in a browser that can reach the exact callback, and refresh. Repeat for each account.
 
 This server flow requests `openid`, `userinfo.email` and the restricted full Drive scope. It uses random one-time state, PKCE and offline access; the server encrypts access/refresh tokens with the configured Fernet key. External apps in Testing with Drive scopes generally receive refresh tokens that expire after seven days. Revoked/expired credentials need reconnection; in some cases the existing grant must be revoked before Google issues a new refresh token. Protect the backend secret, database and encryption key. See [deployment](deployment.md).
+
+### Consent closes without connecting
+
+If the app says consent did not finish (older APKs always said “Google authorization was cancelled”), this alone does **not** prove the user cancelled or identify an OAuth configuration fault. Google can return a failure Intent with a non-OK activity result. The app now decodes any returned Intent through `AuthorizationClient` so its status code is shown; a missing Intent cannot supply a Google error code.
+
+1. Note whether the account picker appeared and whether Google's consent screen appeared before it closed.
+2. In the installed app, open **Settings → Google developer setup**. Compare its package and SHA-1 with the Android OAuth client in the same Cloud project that has Drive API enabled. Do not substitute another APK build's fingerprint.
+3. Check the consent audience/test-user list and device Google Play services. Retry, and share the exact displayed status code or a redacted screenshot. Never share tokens or passwords.
+
+This diagnostic change does not bypass consent or guarantee that a Google Cloud configuration is correct. Real-device verification is still required.

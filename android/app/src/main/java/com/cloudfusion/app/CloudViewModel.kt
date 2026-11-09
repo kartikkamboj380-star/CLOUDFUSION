@@ -173,10 +173,15 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     fun consumeAuthorizationResolution(): PendingIntent? = authorizationResolution.also { authorizationResolution = null }
     fun authorizationCancelled() {
         authorizationResolution = null; authEmail = null; authInProgress = false
-        notice = "Google authorization was cancelled. No account was connected."
+        notice = "Google consent did not finish; no account was connected. If you did not cancel, check Settings → Google developer setup: the installed APK's SHA-1 and package must match your Android OAuth client. Also check Drive API, test users and Google Play services."
     }
     fun finishAuthorization(data: Intent?) {
-        if (authEmail == null) { authorizationCancelled(); return }
+        if (authEmail == null) {
+            authorizationCancelled()
+            error = "Google connection state was lost. Select the account again."
+            return
+        }
+        if (data == null) { authorizationCancelled(); return }
         launch {
             try { completeAuthorization(authorization.getAuthorizationResultFromIntent(data)) }
             catch (e: Exception) { authEmail = null; authInProgress = false; throw e }

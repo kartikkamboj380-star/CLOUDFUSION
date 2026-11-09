@@ -76,7 +76,9 @@ fun CloudFusionApp(vm: CloudViewModel = viewModel()) {
     var tab by remember { mutableIntStateOf(0) }
     val snackbar = remember { SnackbarHostState() }
     val authorization = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) vm.finishAuthorization(result.data) else vm.authorizationCancelled()
+        // Google can return an error Intent even when the Activity result is not OK.
+        // Let AuthorizationClient decode it instead of hiding it as a cancellation.
+        vm.finishAuthorization(result.data)
     }
     val chooser = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val email = if (result.resultCode == Activity.RESULT_OK) result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME) else null
