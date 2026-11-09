@@ -51,7 +51,7 @@ class UrlTransferEngine(private val sources: UrlSourceClient) {
                 val reply = destination.send(session, offset, source, bytes)
                 val uploadNanos = (System.nanoTime() - uploadStart).coerceAtLeast(1)
                 coroutineContext.ensureActive()
-                rates(count * 1_000_000_000L / downloadNanos, count * 1_000_000_000L / uploadNanos, parallel)
+                rates(count * 1_000_000_000L / downloadNanos, count * 1_000_000_000L / uploadNanos, minOf(parallel, count))
                 when (reply) {
                     is UploadReply.Complete -> {
                         check(offset + count == source.size && reply.file.text("id") != null) { "Drive returned an invalid or premature completion. Inspect the destination." }

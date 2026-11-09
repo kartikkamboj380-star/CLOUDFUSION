@@ -83,7 +83,7 @@ class UrlTransferEngineTest {
         suspend fun checkpoint(value: UrlCheckpoint) { lastCheckpoint = value }
     }
 
-    @Test fun smallFileStreamsAndPersistsHashesBeforeFinalUpload() = runBlocking {
+    @Test fun smallFileStreamsAndPersistsHashesBeforeFinalUpload() = runBlocking<Unit> {
         data = "small real payload".toByteArray()
         val destination = Destination()
         val result = UrlTransferEngine(source).run(info(), null, 1, 262144, destination, destination::checkpoint)
@@ -93,7 +93,7 @@ class UrlTransferEngineTest {
         assertTrue(seen.all { it.getHeader("Authorization") == null && it.getHeader("Cookie") == null })
     }
 
-    @Test fun largeFileHasBoundedBlocksAndRealBackpressure() = runBlocking {
+    @Test fun largeFileHasBoundedBlocksAndRealBackpressure() = runBlocking<Unit> {
         data = ByteArray(5 * 1024 * 1024 + 37) { (it % 127).toByte() }
         val destination = Destination()
         val result = UrlTransferEngine(source).run(info(), null, 4, 1024 * 1024, destination, destination::checkpoint)
@@ -104,7 +104,7 @@ class UrlTransferEngineTest {
         assertEquals(1, destination.creates)
     }
 
-    @Test fun controlledFiftyRangeConnectionsAssembleOneDriveFile() = runBlocking {
+    @Test fun controlledFiftyRangeConnectionsAssembleOneDriveFile() = runBlocking<Unit> {
         data = ByteArray(1024 * 1024) { (it % 239).toByte() }
         val destination = Destination()
         UrlTransferEngine(source).run(info(), null, 50, 1024 * 1024, destination, destination::checkpoint)
@@ -115,7 +115,7 @@ class UrlTransferEngineTest {
         assertTrue(seen.drop(1).all { it.getHeader("If-Match") == "\"stable\"" })
     }
 
-    @Test fun nonRangeSourceFallsBackToOneStreamWithoutLocalFile() = runBlocking {
+    @Test fun nonRangeSourceFallsBackToOneStreamWithoutLocalFile() = runBlocking<Unit> {
         ranges = false
         val destination = Destination()
         var effective = 0
@@ -128,7 +128,7 @@ class UrlTransferEngineTest {
         assertEquals(1, effective)
     }
 
-    @Test fun restartAndRetryProbeDriveRatherThanTrustingSavedOffset() = runBlocking {
+    @Test fun restartAndRetryProbeDriveRatherThanTrustingSavedOffset() = runBlocking<Unit> {
         val destination = Destination(); destination.failAfterAccepted = true
         val metadata = info()
         try {
@@ -144,7 +144,7 @@ class UrlTransferEngineTest {
         assertArrayEquals(data, destination.bytes.toByteArray())
     }
 
-    @Test fun pauseAfterChunkThenResumeAndCancelBeforeNextChunk() = runBlocking {
+    @Test fun pauseAfterChunkThenResumeAndCancelBeforeNextChunk() = runBlocking<Unit> {
         val destination = Destination()
         val metadata = info()
         var checkpoints = 0
@@ -163,7 +163,7 @@ class UrlTransferEngineTest {
         assertArrayEquals(data, destination.bytes.toByteArray())
     }
 
-    @Test fun nonRangeResumeRefusesToReplayAcceptedBytes() = runBlocking {
+    @Test fun nonRangeResumeRefusesToReplayAcceptedBytes() = runBlocking<Unit> {
         ranges = false
         val destination = Destination()
         destination.bytes.write(data, 0, 262144)
@@ -176,7 +176,7 @@ class UrlTransferEngineTest {
         assertEquals(0, destination.sends)
     }
 
-    @Test fun changedSourceAndInvalidRangeNeverReachDestination() = runBlocking {
+    @Test fun changedSourceAndInvalidRangeNeverReachDestination() = runBlocking<Unit> {
         val metadata = info()
         etag = "\"changed\""
         val destination = Destination()
@@ -203,7 +203,7 @@ class UrlTransferEngineTest {
         }
     }
 
-    @Test fun specialSourceAddressesAndBadBufferLimitsAreRejected() = runBlocking {
+    @Test fun specialSourceAddressesAndBadBufferLimitsAreRejected() = runBlocking<Unit> {
         for (ip in listOf("127.0.0.1", "10.1.2.3", "169.254.169.254", "100.100.100.200", "192.168.1.1", "::1", "fc00::1", "fe80::1")) {
             assertFalse(ip, publicSourceAddress(InetAddress.getByName(ip)))
         }
