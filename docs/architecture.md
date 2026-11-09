@@ -42,3 +42,13 @@ existing transfer record via additive `remote_sources` migration. One in-process
 20 retained queued/paused/failed task limit, explicitly paused on restart; not a distributed
 job system. Existing direct account/token/session state is separate from server authorization.
 See [the implementation/status document](server-downloads.md) for exact limits and missing work.
+
+
+## 0.4.0 Android Direct Download (current app URL entry point)
+
+Existing Google accounts → source HTTPS client (no OAuth headers) → bounded 256 KiB–4 MiB
+block assembled from up to 50 validated ranges → one ordered Google resumable upload.
+No backend origin/login and no local full-file staging. The existing transfer state machine,
+Keystore persistence, token refresh, quota selection and restart recovery are reused.
+The optional server workspace remains separate and is no longer the direct URL screen.
+See [Android Direct Download](android-direct-downloads.md) for fallback/resume/integrity rules.

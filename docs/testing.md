@@ -1,4 +1,14 @@
-# Verification record — 0.3.0 increment
+# Verification record
+
+## 0.4.0 Android-side URL update
+
+Adds controlled MockWebServer + fake upload-target tests in `UrlTransferEngineTest`. Final
+hosted Actions results and artifact are given in the delivery response; a queued/failed run
+is not counted as a pass. Tests cover bounded streaming, safe source ranges and 50 connections,
+resume/reconciliation, cancellation, errors and full payload SHA-256 equality. Actual Google
+OAuth/Drive/device/process-kill tests remain unexecuted. See [direct-download guide](android-direct-downloads.md).
+
+## Prior 0.3.0 increment
 
 ## Executed in the workspace
 

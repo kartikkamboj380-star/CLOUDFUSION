@@ -84,3 +84,11 @@ require Reconnect; network failures require connectivity/retry, not new credenti
 The app cannot inspect private Google Cloud settings to verify them automatically.
 Testing does not require publishing publicly; public restricted-scope distribution may need
 Google review. None of this repository's mocked tests proves that review or live login.
+
+
+## Android Direct Download 0.4.0
+
+URL downloads reuse existing direct-Drive accounts and the same Drive scope. No Web client,
+backend session or new consent flow is added. Reconnect only through Accounts if required.
+A changed APK signing certificate still changes the Android OAuth identity; an existing
+connection does not eliminate package/certificate requirements. Live OAuth is unverified here.

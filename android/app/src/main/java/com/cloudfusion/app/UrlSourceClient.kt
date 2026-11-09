@@ -45,12 +45,12 @@ class SourceStream(val response: Response) : Closeable {
 class UrlSourceClient internal constructor(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
-        .proxy(Proxy.NO_PROXY).dns { host ->
-            Dns.SYSTEM.lookup(host).also { addresses ->
+        .proxy(Proxy.NO_PROXY).dns(object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> = Dns.SYSTEM.lookup(hostname).also { addresses ->
                 if (addresses.isEmpty() || addresses.any { !publicSourceAddress(it) })
                     throw java.net.UnknownHostException("Private or special source address blocked")
             }
-        }.connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
+        }).connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .callTimeout(60, TimeUnit.SECONDS).build(),
     private val allowed: (HttpUrl) -> Boolean = { it.scheme == "https" && it.port == 443 }
 ) {

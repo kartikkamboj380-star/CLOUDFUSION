@@ -548,6 +548,9 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
                 runTransfer(id, selectedUri)
             } catch (_: CancellationException) {
                 // cancelTransfer records the state. Process death is detected at next launch.
+            } catch (_: OutOfMemoryError) {
+                error = "Not enough memory. Pause other apps, choose a 256 KiB buffer and 1 connection, then resume to reconcile Drive."
+                try { changeTransfer(id) { it.put("status", "interrupted").put("error", error) } } catch (_: Throwable) { }
             } catch (e: Exception) {
                 if (transfer(id).optString("status") in listOf("cancelled", "paused")) return@launch
                 val blocked = e is DriveException && e.code in listOf(404, 410)
