@@ -93,3 +93,13 @@ fun sameGoogleAccount(selected: String, returned: String?): Boolean =
     !returned.isNullOrBlank() && selected.trim().equals(returned.trim(), ignoreCase = true)
 
 fun isWorkspaceNative(mime: String): Boolean = mime.startsWith("application/vnd.google-apps.")
+
+/** Completion without a checksum is not equivalent to verified completion. */
+enum class CompletionIntegrity { VERIFIED, UNVERIFIED, MISMATCH }
+
+fun completionIntegrity(expectedSize: Long, actualSize: Long?, expectedMd5: String?, actualMd5: String?): CompletionIntegrity {
+    require(expectedSize >= 0)
+    if (actualSize != null && actualSize != expectedSize) return CompletionIntegrity.MISMATCH
+    if (expectedMd5.isNullOrBlank() || actualMd5.isNullOrBlank()) return CompletionIntegrity.UNVERIFIED
+    return if (expectedMd5.equals(actualMd5, ignoreCase = true)) CompletionIntegrity.VERIFIED else CompletionIntegrity.MISMATCH
+}

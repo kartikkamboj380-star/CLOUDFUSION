@@ -51,6 +51,14 @@ class DriveRulesTest {
         assertThrows(IllegalStateException::class.java) { committedOffset("bytes=0-999999999999999999999", 100) }
     }
 
+    @Test fun completionNeverClaimsVerificationWithoutMatchingChecksum() {
+        assertEquals(CompletionIntegrity.VERIFIED, completionIntegrity(5, 5, "AABB", "aabb"))
+        assertEquals(CompletionIntegrity.UNVERIFIED, completionIntegrity(5, 5, "aabb", null))
+        assertEquals(CompletionIntegrity.UNVERIFIED, completionIntegrity(5, null, null, "aabb"))
+        assertEquals(CompletionIntegrity.MISMATCH, completionIntegrity(5, 4, "aabb", "aabb"))
+        assertEquals(CompletionIntegrity.MISMATCH, completionIntegrity(5, 5, "aabb", "ccdd"))
+    }
+
     @Test fun selectedAccountMustMatchDriveIdentity() {
         assertTrue(sameGoogleAccount("person@example.com", "PERSON@example.com"))
         assertFalse(sameGoogleAccount("person@example.com", "other@example.com"))

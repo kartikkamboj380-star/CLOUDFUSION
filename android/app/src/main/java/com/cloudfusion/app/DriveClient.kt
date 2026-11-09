@@ -16,6 +16,22 @@ fun JSONObject.text(key: String): String? = if (!has(key) || isNull(key)) null e
 fun JSONObject.longOrNull(key: String): Long? = if (!has(key) || isNull(key)) null else optString(key).toLongOrNull()
 fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 
+/** Reject a different identity; never interpret missing quota data as an unlimited account. */
+internal fun accountFromAbout(email: String, about: JSONObject): JSONObject {
+    val returned = about.optJSONObject("user")?.text("emailAddress")
+    check(sameGoogleAccount(email, returned)) { "Google returned a different or unknown account. No data was associated; select the intended account again." }
+    val q = about.optJSONObject("storageQuota")
+    val used = q?.longOrNull("usage")
+    val limit = q?.longOrNull("limit")
+    val unlimited = q != null && (!q.has("limit") || q.isNull("limit"))
+    val valid = used != null && used >= 0 && (unlimited || (limit != null && limit >= 0))
+    return JSONObject().put("id", email).put("email", email)
+        .put("used_bytes", used ?: JSONObject.NULL).put("limit_bytes", limit ?: JSONObject.NULL)
+        .put("free_bytes", if (valid && !unlimited) (limit!! - used!!).coerceAtLeast(0) else JSONObject.NULL)
+        .put("unlimited", unlimited && valid).put("reauthorization_required", false)
+        .put("quota_error", if (valid) JSONObject.NULL else "Google did not provide a complete quota.")
+}
+
 class DriveException(val code: Int, message: String) : Exception(message)
 sealed interface UploadReply {
     data class Incomplete(val offset: Long) : UploadReply

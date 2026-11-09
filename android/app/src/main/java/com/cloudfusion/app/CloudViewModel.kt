@@ -112,20 +112,6 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
         account.optBoolean("unlimited"), account.text("quota_error") == null && !account.optBoolean("reauthorization_required")
     )
 
-    private fun accountFromAbout(email: String, about: JSONObject): JSONObject {
-        val returned = about.optJSONObject("user")?.text("emailAddress")
-        check(sameGoogleAccount(email, returned)) { "Google returned a different or unknown account. No data was associated; select the intended account again." }
-        val q = about.optJSONObject("storageQuota")
-        val used = q?.longOrNull("usage")
-        val limit = q?.longOrNull("limit")
-        val unlimited = q != null && (!q.has("limit") || q.isNull("limit"))
-        val valid = used != null && used >= 0 && (unlimited || (limit != null && limit >= 0))
-        return JSONObject().put("id", email).put("email", email)
-            .put("used_bytes", used ?: JSONObject.NULL).put("limit_bytes", limit ?: JSONObject.NULL)
-            .put("free_bytes", if (valid && !unlimited) (limit!! - used!!).coerceAtLeast(0) else JSONObject.NULL)
-            .put("unlimited", unlimited && valid).put("reauthorization_required", false)
-            .put("quota_error", if (valid) JSONObject.NULL else "Google did not provide a complete quota.")
-    }
 
     private fun updateDashboard() {
         val aggregate = aggregateQuota(accounts.map(::quota))
@@ -439,6 +425,8 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
         val checksum = file.text("md5_checksum") ?: throw IllegalStateException("Google did not provide a source checksum; this copy cannot be verified safely.")
         refreshAccountsNow()
         check(chooseDestination(accounts.map(::quota), size, destination) != null) { "Destination quota is unknown or does not have enough free space." }
+        // Another action may have started a transfer while the quota refresh was suspended.
+        check(transferJob?.isCompleted != false) { "A transfer is already running on this device." }
         val t = JSONObject().put("id", UUID.randomUUID().toString()).put("kind", "copy").put("name", file.optString("name"))
             .put("mime_type", mime).put("size", size).put("source_account_id", source).put("source_file_id", file.getString("id"))
             .put("destination_account_id", destination).put("expected_md5", checksum).put("bytes_transferred", 0).put("status", "pending")
@@ -613,18 +601,18 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     private fun finishTransfer(id: String, result: JSONObject) {
         val t = transfer(id); val size = t.getLong("size"); val expected = t.text("expected_md5")
         val actual = result.text("md5Checksum"); val actualSize = result.longOrNull("size")
-        val mismatch = (actualSize != null && actualSize != size) || (expected != null && actual != null && !expected.equals(actual, true))
+        val integrity = completionIntegrity(size, actualSize, expected, actual)
         changeTransfer(id) {
             it.put("bytes_transferred", size).put("result_file_id", result.optString("id"))
-            it.put("checksum_verified", !mismatch && expected != null && actual != null)
-            it.put("status", if (mismatch) "review_required" else "completed")
+            it.put("checksum_verified", integrity == CompletionIntegrity.VERIFIED)
+            it.put("status", if (integrity == CompletionIntegrity.MISMATCH) "review_required" else "completed")
             it.put("resume_blocked", true).remove("session_url")
-            if (mismatch) it.put("error", "Destination size or checksum differs. The file may exist in Drive; review it manually.") else it.remove("error")
+            if (integrity == CompletionIntegrity.MISMATCH) it.put("error", "Destination size or checksum differs. The file may exist in Drive; review it manually.") else it.remove("error")
         }
-        notice = when {
-            mismatch -> "Transfer finished with a mismatch. Review the destination file in Drive."
-            expected != null && actual != null -> "Transfer complete. MD5 checksum verified."
-            else -> "Transfer complete. Google did not return a checksum; verify the destination."
+        notice = when (integrity) {
+            CompletionIntegrity.MISMATCH -> "Transfer finished with a mismatch. Review the destination file in Drive."
+            CompletionIntegrity.VERIFIED -> "Transfer complete. MD5 checksum verified."
+            CompletionIntegrity.UNVERIFIED -> "Transfer complete. Google did not return a checksum; verify the destination."
         }
         loadFiles()
     }

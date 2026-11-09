@@ -4,6 +4,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -21,6 +22,23 @@ class DriveClientTest {
             OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).readTimeout(5, TimeUnit.SECONDS).build())
     }
     @After fun tearDown() { server.shutdown() }
+
+    @Test fun aboutParsingRejectsWrongIdentityAndUnknownQuota() {
+        val finite = accountFromAbout("a@example.com", JSONObject("""{"user":{"emailAddress":"A@example.com"},"storageQuota":{"usage":"30","limit":"100"}}"""))
+        assertEquals(30L, finite.longOrNull("used_bytes"))
+        assertEquals(70L, finite.longOrNull("free_bytes"))
+        assertFalse(finite.optBoolean("unlimited"))
+        val unlimited = accountFromAbout("a@example.com", JSONObject("""{"user":{"emailAddress":"a@example.com"},"storageQuota":{"usage":"7"}}"""))
+        assertTrue(unlimited.optBoolean("unlimited"))
+        val missing = accountFromAbout("a@example.com", JSONObject("""{"user":{"emailAddress":"a@example.com"}}"""))
+        assertFalse(missing.optBoolean("unlimited"))
+        assertNotNull(missing.text("quota_error"))
+        val malformed = accountFromAbout("a@example.com", JSONObject("""{"user":{"emailAddress":"a@example.com"},"storageQuota":{"usage":"7","limit":"invalid"}}"""))
+        assertNotNull(malformed.text("quota_error"))
+        assertThrows(IllegalStateException::class.java) {
+            accountFromAbout("a@example.com", JSONObject("""{"user":{"emailAddress":"other@example.com"}}"""))
+        }
+    }
 
     @Test fun uploadUsesSessionProbeAndCorrectRanges() {
         val location = server.url("/upload/drive/v3/files?upload_id=test").toString()
