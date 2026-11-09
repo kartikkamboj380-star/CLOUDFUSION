@@ -4,6 +4,7 @@ The current deployment runs one API worker; PostgreSQL row locks protect quota
 reservations, while per-transfer locks serialize chunk/retry/cancel operations.
 """
 import threading
+import weakref
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -21,8 +22,15 @@ from .security import decrypt, encrypt
 CHUNK_SIZE = 4 * 1024 * 1024  # A multiple of Drive's 256 KiB requirement.
 _reservation_lock = threading.RLock()
 _locks_guard = threading.Lock()
-_locks: dict[str, threading.RLock] = {}
+_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 ACTIVE = ("initializing", "pending", "in_progress", "cancel_requested")
+
+
+@contextmanager
+def account_mutation_lock():
+    """Serialize account removal with reservations on the supported single worker."""
+    with _reservation_lock:
+        yield
 
 
 @contextmanager

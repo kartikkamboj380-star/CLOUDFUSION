@@ -1,3 +1,4 @@
+import logging
 import secrets
 import threading
 import time
@@ -29,6 +30,9 @@ async def lifespan(_app: FastAPI):
     yield
 
 
+# HTTP clients can otherwise log resumable session URLs (which are credentials).
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 app = FastAPI(title="CloudFusion API", version="0.1.0", lifespan=lifespan)
 settings = get_settings()
 origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
@@ -150,14 +154,15 @@ def refresh_accounts(user: User = Depends(current_user), db: Session = Depends(g
 
 @app.delete("/api/accounts/{account_id}", status_code=204)
 def disconnect_account(account_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    account = owned_account(db, user.id, account_id, lock=True)
-    active = db.scalar(select(func.count()).select_from(Transfer).where(
-        Transfer.user_id == user.id, Transfer.status.in_(transfers.ACTIVE),
-        (Transfer.destination_account_id == account_id) | (Transfer.source_account_id == account_id)))
-    if active:
-        raise HTTPException(409, "Cancel active transfers involving this account before disconnecting it")
-    db.delete(account)
-    db.commit()
+    with transfers.account_mutation_lock():
+        account = owned_account(db, user.id, account_id, lock=True)
+        active = db.scalar(select(func.count()).select_from(Transfer).where(
+            Transfer.user_id == user.id, Transfer.status.in_(transfers.ACTIVE),
+            (Transfer.destination_account_id == account_id) | (Transfer.source_account_id == account_id)))
+        if active:
+            raise HTTPException(409, "Cancel active transfers involving this account before disconnecting it")
+        db.delete(account)
+        db.commit()
     return None
 
 
@@ -313,16 +318,24 @@ def _download_stream(user_id: str, transfer_id: str):
         t = transfers.owned_transfer(db, user_id, transfer_id)
         account = owned_account(db, user_id, t.source_account_id)
         sent = 0
+        last_check = last_save = time.monotonic()
+        saved_bytes = 0
+        checked_bytes = -1024 * 1024
         try:
             with drive.client_for(db, account).stream_download(t.source_file_id) as response:
                 for part in response.iter_bytes(chunk_size=256 * 1024):
-                    db.refresh(t)
-                    if t.cancel_requested or t.status == "cancelled":
-                        return
+                    now = time.monotonic()
+                    if sent - checked_bytes >= 1024 * 1024 or now - last_check >= 1:
+                        db.refresh(t)
+                        if t.cancel_requested or t.status == "cancelled":
+                            return
+                        checked_bytes, last_check = sent, now
                     yield part
                     sent += len(part)
-                    t.bytes_transferred = sent
-                    db.commit()
+                    if sent - saved_bytes >= 4 * 1024 * 1024 or now - last_save >= 2:
+                        t.bytes_transferred = sent
+                        db.commit()
+                        saved_bytes, last_save = sent, now
             db.refresh(t)
             if not t.cancel_requested:
                 if sent == t.size:

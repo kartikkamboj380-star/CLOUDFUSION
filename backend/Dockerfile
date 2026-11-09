@@ -9,4 +9,4 @@ COPY app ./app
 USER cloudfusion
 EXPOSE 8000
 # Single worker: cloud-to-cloud transfers are in-process and restart-recoverable, not a durable queue.
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers --no-access-log"]

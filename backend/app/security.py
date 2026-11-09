@@ -7,6 +7,7 @@ from datetime import timedelta
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -50,6 +51,7 @@ def token_hash(token: str) -> str:
 
 
 def make_session(db: Session, user: User) -> str:
+    db.execute(delete(LoginSession).where(LoginSession.expires_at <= utcnow()))
     token = secrets.token_urlsafe(32)
     db.add(LoginSession(token_hash=token_hash(token), user_id=user.id,
                         expires_at=utcnow() + timedelta(days=get_settings().session_days)))

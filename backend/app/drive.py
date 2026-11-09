@@ -33,10 +33,14 @@ def valid_id(value: str) -> str:
 
 
 def valid_session_url(url: str) -> str:
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
-    if (parts.scheme != "https" or not (host == "googleapis.com" or host.endswith(".googleapis.com"))
-            or parts.username or parts.password or parts.port not in (None, 443)):
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        valid = (parts.scheme == "https" and (host == "googleapis.com" or host.endswith(".googleapis.com"))
+                 and not parts.username and not parts.password and parts.port in (None, 443))
+    except ValueError:
+        valid = False
+    if not valid:
         raise DriveFailure(502, "Google returned an invalid upload session URL")
     return url
 
@@ -112,6 +116,9 @@ class GoogleDrive:
             if response.status_code != 401 or attempt:
                 break
         if not response.is_success:
+            if response.status_code == 401:
+                self.account.reauth_required = True
+                self.db.commit()
             raise _error(response)
         return response
 
@@ -185,14 +192,21 @@ class GoogleDrive:
         metadata = {"name": name, "mimeType": mime_type}
         if parent_id:
             metadata["parents"] = [valid_id(parent_id)]
-        headers = {"Authorization": "Bearer " + self.access_token(), "X-Upload-Content-Type": mime_type,
-                   "X-Upload-Content-Length": str(size), "Content-Type": "application/json; charset=UTF-8"}
-        try:
-            response = httpx.post(UPLOAD_API + "/files", params={"uploadType": "resumable", "fields": "id,name,size,md5Checksum,webViewLink", "supportsAllDrives": "true"},
-                                  headers=headers, json=metadata, timeout=60)
-        except httpx.HTTPError as exc:
-            raise DriveFailure(502, "Could not initiate Google Drive upload") from exc
+        headers = {"X-Upload-Content-Type": mime_type, "X-Upload-Content-Length": str(size),
+                   "Content-Type": "application/json; charset=UTF-8"}
+        for attempt in range(2):
+            headers["Authorization"] = "Bearer " + self.access_token(force=attempt == 1)
+            try:
+                response = httpx.post(UPLOAD_API + "/files", params={"uploadType": "resumable", "fields": "id,name,size,md5Checksum,webViewLink", "supportsAllDrives": "true"},
+                                      headers=headers, json=metadata, timeout=60)
+            except httpx.HTTPError as exc:
+                raise DriveFailure(502, "Could not initiate Google Drive upload") from exc
+            if response.status_code != 401 or attempt:
+                break
         if not response.is_success:
+            if response.status_code == 401:
+                self.account.reauth_required = True
+                self.db.commit()
             raise _error(response)
         return valid_session_url(response.headers.get("Location", ""))
 
@@ -235,16 +249,26 @@ class GoogleDrive:
 
     @contextlib.contextmanager
     def stream_download(self, file_id: str, offset: int = 0):
-        headers = {"Authorization": "Bearer " + self.access_token()}
+        headers = {}
         if offset:
             headers["Range"] = f"bytes={offset}-"
         try:
             with httpx.Client(timeout=httpx.Timeout(120, connect=30), follow_redirects=False) as client:
-                with client.stream("GET", API + "/files/" + valid_id(file_id),
-                                   params={"alt": "media", "supportsAllDrives": "true"}, headers=headers) as response:
-                    if response.status_code not in ((206,) if offset else (200, 206)):
-                        raise _error(response)
-                    yield response
+                for attempt in range(2):
+                    headers["Authorization"] = "Bearer " + self.access_token(force=attempt == 1)
+                    with client.stream("GET", API + "/files/" + valid_id(file_id),
+                                       params={"alt": "media", "supportsAllDrives": "true"}, headers=headers) as response:
+                        if response.status_code == 401 and attempt == 0:
+                            continue
+                        if response.status_code not in ((206,) if offset else (200, 206)):
+                            if response.status_code == 401:
+                                self.account.reauth_required = True
+                                self.db.commit()
+                            raise _error(response)
+                        if offset and not response.headers.get("Content-Range", "").startswith(f"bytes {offset}-"):
+                            raise DriveFailure(502, "Google returned an unexpected download range; retry the transfer")
+                        yield response
+                        return
         except httpx.HTTPError as exc:
             raise DriveFailure(502, "Google Drive download stream failed") from exc
 

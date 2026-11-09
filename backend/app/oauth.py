@@ -21,6 +21,7 @@ def start_oauth(db: Session, user: User) -> str:
     settings = get_settings()
     if not settings.google_client_id or not settings.google_client_secret:
         raise HTTPException(503, "Google OAuth is not configured on the server")
+    db.execute(delete(OAuthState).where(OAuthState.expires_at <= utcnow()))
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
