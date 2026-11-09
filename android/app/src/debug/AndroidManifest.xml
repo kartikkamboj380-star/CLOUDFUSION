@@ -1,4 +1,0 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
-    <!-- Debug builds may reach the Android emulator's host alias only; Api.kt enforces the host. -->
-    <application android:usesCleartextTraffic="true" tools:replace="android:usesCleartextTraffic" />
-</manifest>

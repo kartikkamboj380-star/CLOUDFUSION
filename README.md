@@ -1,146 +1,103 @@
 # CloudFusion
 
-CloudFusion is an Android-first, self-hosted application for managing several Google Drive accounts from one interface. It presents a **virtual unified view**: Google accounts are not merged, their quotas are not pooled by Google, and each file remains a normal file in its destination account. The dashboard uses the real quotas returned by Google Drive; it does not assume 15 GB per account.
+CloudFusion is an Android-first **virtual view** of multiple Google Drive accounts. Google accounts and their storage are not merged; each file stays in one ordinary Drive account. Quotas and file metadata come from Google rather than fixed or sample values.
 
-The repository includes a Kotlin/Jetpack Compose Android app, a FastAPI/PostgreSQL service, and an optional React/TypeScript web companion. **This is an initial implementation, not a claim of production readiness.** Review the security and operational limitations below before deploying it for others.
+## Android: no CloudFusion backend
 
-## What is implemented
+The Android app connects **directly to Google Drive** using Google Play services. There is no backend URL, separate CloudFusion email/password, or self-hosted server to run for Android. **The APK still requires Google Cloud OAuth configuration before Google account access will work.** See [Android Google OAuth setup](docs/google-oauth.md#android-direct-google-drive) and the exact signing fingerprint instructions below.
 
-- Local CloudFusion login, multiple Google account connections and reauthorization via Google's OAuth 2.0 authorization-code flow with PKCE, offline access and one-time state.
-- Real per-account and aggregate Drive quota, account status, recent indexed files, recent uploads/transfers, and active/failed transfer counts. Unavailable or unlimited quota is shown as such, not counted as zero.
-- A paginated, searchable, filterable and sortable index of actual Drive file IDs, with source account and owner where Google provides it. Refresh the index to see external changes. Create folders, rename, move within a Drive, and move files to trash.
-- Automatic allocation based on refreshed quota and projected utilization, or manual account selection. Capacity is reserved for active uploads, and the destination is shown before bytes are sent. Files are **not** split between accounts.
-- Bounded-memory resumable uploads through the service, progress, cancellation, idempotency keys, retry/reconciliation and transfer history. Android uses the Storage Access Framework, 4 MiB upload chunks, streaming downloads and optional MD5 comparison when Google supplies a checksum.
-- Backend-mediated streaming copies between accounts, with progress, cancellation, retry and MD5 comparison when both sides provide a checksum. The backend streams chunks rather than silently downloading the file to the phone or writing an entire temporary file.
-- Permission listing, explicitly confirmed public-link creation, link copying and public-access revocation. A file is never made public automatically.
-- Dark Material 3 Android navigation for Home, Files, Transfers, Accounts and Settings; an optional responsive web companion; Alembic migrations; Docker Compose; and separate Android, backend and web CI workflows.
+The implementation provides:
 
-## Architecture
+- Google device-account selection and explicit Drive authorization for multiple accounts; reconnect and disconnect controls. Drive's returned identity is checked against the selected account before its token is used.
+- Actual per-account quota and an aggregate of the returned values; unavailable and unlimited values are not assumed to be zero. Workspace organizations can expose a shared pool, so an aggregate can **double-count the same organizational pool**.
+- Live, paginated Drive search and type filters, with sorting of loaded results; account and owner identification, folder creation, rename, within-account move, trash, download and explicitly confirmed public-link sharing/revocation where Google allows them.
+- Whole-file destination selection from freshly fetched quotas, or a manual destination, shown before an upload. Google enforces the final quota; there is no cross-device reservation and files are not split across accounts.
+- Bounded-memory, resumable uploads and account-to-account copies. **Copies are downloaded and uploaded through the phone**, using both directions of its network, battery and time. Transfers run while the app remains open and online, not in the background or on a server. Upload/copy sessions are encrypted locally, are reconciled with Google before resume, and can expire. Downloads stream to a user-selected document and are not resumable. Check Drive before starting a replacement when the outcome is uncertain.
+- A dark Compose UI, Android unit tests, and an Actions workflow that builds a debug APK and publishes its public certificate fingerprint.
 
-```text
-Android (Compose + SAF) ─┐
-                         ├── HTTPS /api ── FastAPI ── Google OAuth / Drive API v3
-Web (React + Vite) ──────┘                    │
-                                          PostgreSQL
-                          (encrypted Google tokens, metadata, transfer state)
+This is an initial implementation, not a claim of production readiness or a verified Google application. Automated tests use mocks; **real Google OAuth, multiple-account Drive access and transfers have not been verified on a real device** in this repository.
+
+## Configure and use Android
+
+1. Have a Google Play services-enabled Android device (Android 8.0/API 26 or newer) with the Google accounts you intend to use added to the device.
+2. Download a successful **backend-free** branch/commit's `CloudFusion-debug-apk` Actions artifact. It contains `app-debug.apk` and `signing-certificate.txt`. Artifacts expire after 14 days. Earlier APKs from the original release still require a backend.
+3. In a Google Cloud project you control, enable the **Google Drive API**, configure the consent screen and add each account as a test user while the app is in Testing. Create an **Android OAuth client** with package name `com.cloudfusion.app` and the exact **SHA-1 of the certificate that signed that APK**. The artifact's `signing-certificate.txt`, the Actions run summary, and the installed app's **Settings → Google developer setup** show the SHA-1. Google Cloud may expect the hex bytes separated by colons; format them as `AA:BB:...` if needed. See [the detailed guide](docs/google-oauth.md#android-direct-google-drive).
+4. Install the APK, open **Accounts → Connect Google account**, choose an account and approve Google's consent screen. Repeat for each account; refresh accounts/files. No Google password is entered in CloudFusion.
+
+Each GitHub-hosted debug build normally creates a **new debug signing key**, so its SHA-1 can differ from previous builds. Register the certificate of the *specific APK installed*, not the certificate from an older run. A differently signed APK cannot update an installed copy with the same package name: Android may require uninstalling the old debug app first, which removes its local app state but does not delete Google Drive files. Use a securely managed, stable signing key for a release. No signing key or OAuth secret is included in this repository.
+
+Full Drive access is a **restricted Google scope**. While the app is in Testing, accounts must be test users; Workspace admins can impose additional restrictions. Public distribution can require OAuth verification, privacy disclosures and potentially a security assessment. Do not claim Google approval without completing its review.
+
+### Build Android locally
+
+Requires JDK 17, Android SDK platform/build tools 35, and network access to Gradle/Google Maven. The pinned Gradle 8.10.2 wrapper verifies its distribution checksum.
+
+```bash
+cd android
+./gradlew testDebugUnitTest assembleDebug
+# app/build/outputs/apk/debug/app-debug.apk
+"$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The web app uses relative `/api` URLs; its dev server and container proxy those requests to the backend. Android connects to a user-configured backend origin. Google OAuth happens in the system browser; the backend is the confidential OAuth client. See [architecture and transfer details](docs/architecture.md).
+Register the printed SHA-1 for this build's signing key. No Google client secret, `google-services.json`, Web client ID, or backend URL is embedded or entered into the Android app. See [setup and troubleshooting](docs/google-oauth.md).
 
-## Requirements
+## Architecture and optional legacy service
 
-- Python 3.11+ for local backend development, or Docker and Docker Compose.
-- Node.js 22 for the web companion.
-- JDK 17 and Android SDK platform/build tools 35 for Android builds. The Gradle wrapper downloads Gradle 8.10.2 and verifies its distribution checksum.
-- A Google Cloud project with Drive API enabled and a configured **Web application** OAuth client. Real Google integration requires your own credentials and test users or approved OAuth verification.
+```text
+Android (Compose + Google Play services + SAF) ── HTTPS ── Google Drive API v3
+       └─ encrypted on-device account/transfer state; copies travel through the phone
 
-## 1. Configure Google OAuth
+Optional, separate legacy setup:
+Web (React + Vite) ── HTTPS /api ── FastAPI ── Google OAuth / Drive API v3
+                                       └──── PostgreSQL (encrypted server credentials/state)
+```
 
-Follow the complete [Google Cloud setup guide](docs/google-oauth.md). In brief:
+The existing FastAPI backend and React web companion remain available as a **separate optional product path**. They still require a deployed service, a local CloudFusion login, and a Web OAuth client; they are not used by the new direct Android app. The two paths do not automatically share account connections or transfer history. See [architecture](docs/architecture.md) and [deployment](docs/deployment.md).
 
-1. Enable **Google Drive API** in a Google Cloud project and configure the OAuth consent screen.
-2. Add every Google account you want to connect as a test user while the application is in Testing.
-3. Create a **Web application** OAuth client and add the exact redirect URI, for example `https://cloud.example.com/api/oauth/callback`.
-4. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_REDIRECT_URI` in your server environment. Do not put the client secret in the Android app.
+### Optional backend and web quick start
 
-CloudFusion requests `openid`, `userinfo.email`, and the restricted `https://www.googleapis.com/auth/drive` scope. Full Drive access is necessary for the requested cross-account file listing and management; `drive.file` alone only covers files opened or created by the app. Google may require verification and an independent security assessment before a public app can use restricted scopes. External apps in Testing with Drive scopes generally receive refresh tokens that expire after seven days; reconnect affected accounts. Workspace administrators may impose additional restrictions.
-
-## 2. Run with Docker Compose
+Requirements: Docker Compose, or Python 3.11+ and Node.js 22. Configure the optional backend's Web OAuth client as described in [Google OAuth setup](docs/google-oauth.md#optional-legacy-backend-and-web). Then:
 
 ```bash
 cp .env.example .env
-# Edit .env: set a strong PostgreSQL password, a unique Fernet key,
-# Google OAuth credentials, and the exact redirect URI.
+# Set a strong database password, a Fernet key, and Web OAuth credentials in .env.
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 docker compose up --build -d
 ```
 
-The key-generation command requires the Python `cryptography` package; alternatively generate the key in a trusted environment with that package installed. Keep the key stable across restarts and back it up securely. Set `DATABASE_URL` in `.env` to match `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB`; URL-encode special characters in the password in the URL.
+The key-generation command needs Python `cryptography`; generate it in a trusted environment. Keep the key stable and backed up. `DATABASE_URL` must match the database credentials; URL-encode special characters. Compose binds the web app to `127.0.0.1:8080` and API to `127.0.0.1:8000` on the host. Use a trusted HTTPS reverse proxy for external access. The web app uses relative `/api` URLs; it still uses the backend and its transfers run under the backend's documented limitations.
 
-Compose binds the web app to `127.0.0.1:8080` and API to `127.0.0.1:8000` on the Docker host. For a real phone or external OAuth callback, put an HTTPS reverse proxy in front of the web container at your configured domain. It proxies `/api` to the service. Do not expose the API or database directly to the internet. See [deployment and security](docs/deployment.md).
-
-On the Docker host, `http://localhost:8080` is useful for local web development only. The health endpoint is `/api/health` and interactive API documentation is at `/docs` on the backend (or `/api` routes through the web proxy).
-
-## 3. Local backend development
+For local development and tests:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r backend/requirements-dev.txt
 cd backend
 cp ../.env.example .env
-# In backend/.env set DATABASE_URL=sqlite:///./cloudfusion.db,
-# a generated FERNET_KEY, and your Google OAuth values.
+# Set DATABASE_URL=sqlite:///./cloudfusion.db, a generated FERNET_KEY, and Web OAuth values.
 ../.venv/bin/alembic upgrade head
 ../.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
-```
+# In another terminal: cd backend && ../.venv/bin/pytest -q
 
-SQLite is useful for local development/tests; use PostgreSQL for a deployment. The configured `GOOGLE_REDIRECT_URI` must be reachable from the browser performing consent and must exactly match the Cloud Console URI. `http://localhost:8000/api/oauth/callback` can be used for a local desktop OAuth test; use HTTPS for an external deployment.
-
-Run backend tests and a migration check:
-
-```bash
-cd backend
-../.venv/bin/alembic upgrade head
-../.venv/bin/pytest -q
-```
-
-Tests use an isolated SQLite database and mocked Google responses. They do not contact real Google accounts or verify a deployed PostgreSQL instance.
-
-## 4. Web companion
-
-With the backend running:
-
-```bash
-cd web
+cd ../web
 npm ci
-npm run dev            # port 5173; /api is proxied to the backend
+npm run dev       # /api is proxied to the backend
 npm test
 npm run build
 ```
 
-Set `API_PROXY_TARGET` **for the Vite server** if the backend is elsewhere. The browser still sends same-origin `/api` requests. For deployment the `web` container serves the compiled app and proxies `/api`. Browser downloads stream to a user-selected file only where the File System Access API is supported; otherwise use the Android app. Browser and Android uploads run while their client remains open.
+## Android limitations and safety
 
-## 5. Build and use Android
+- Only one transfer runs at a time on this device. No background service or scheduled unattended job is implemented. Android may stop the app when it is backgrounded. A cancelled in-flight request can still complete; inspect Drive. A cancelled/interrupted download may leave a partial local file.
+- Uploads and copies require a known, nonzero size up to 5 TiB. Copies require a Google-provided source MD5; native Google Workspace documents and folders cannot be copied or downloaded as binary files. Export and recursive folder copy are not implemented. Upload resume re-hashes the original selected file before continuing; copies compare source and destination checksums when Google supplies both. A destination without a returned checksum is reported as unverified. MD5 detects common corruption, not malicious tampering.
+- Google Drive queries run per account and pages are combined locally. Sorting is among **loaded** results, not a guaranteed global order across unrequested pages; size paging uses Google's `quotaBytesUsed` order, which can differ from file size. Refresh after external changes. Search follows Drive's `name contains` behavior. Shared-drive and organization policies may restrict results/actions.
+- Account identifiers, transfer history and resumable-session URLs are encrypted with Android Keystore in app-private storage; the app keeps Google access tokens only in memory. Google Play services manages its own authorization cache. Android backup is disabled. Disconnect removes the account locally but does not delete Drive files or revoke the Google grant; revoke it in [Google Account permissions](https://myaccount.google.com/permissions).
+- OAuth and Drive requests go to Google over HTTPS, not CloudFusion's backend. Google controls consent, quotas, rate limits, scope restrictions, shared-drive permissions and token validity. Do not commit OAuth secrets, private keystores, real tokens or private user data.
 
-```bash
-cd android
-./gradlew testDebugUnitTest assembleDebug
-# android/app/build/outputs/apk/debug/app-debug.apk
-```
+## CI and documentation
 
-Install the debug APK on Android 8.0+ (API 26+). Enter your **trusted HTTPS backend origin** on the sign-in screen, create/sign in to a CloudFusion account, then connect Google accounts in the browser. Refresh quotas and files after connecting. Debug builds additionally permit `http://10.0.2.2` for an Android emulator's host; this does not make a local OAuth callback reachable automatically from the emulator browser. A real device needs a reachable server and a trusted TLS certificate.
+The [Actions page](https://github.com/kartikkamboj380-star/CLOUDFUSION/actions) shows actual build/test results. Android runs unit tests and builds a debug APK; backend and web have separate workflows. Debug APKs are not release builds; there is no release-signing workflow.
 
-Android selects upload/download locations with the Storage Access Framework. To resume an interrupted upload after the app is closed, open Transfers and select the **same original file**. Downloading writes only to the location you select. No Android Google client secret or `google-services.json` is needed for this backend-driven OAuth design.
-
-## GitHub Actions and APK artifacts
-
-- **Android debug APK**: installs Java and Android SDK packages, runs `testDebugUnitTest` and `assembleDebug`, then uploads `CloudFusion-debug-apk` for 14 days if successful.
-- **Backend tests**: installs Python dependencies, applies migrations to SQLite and runs pytest.
-- **Web tests and build**: installs dependencies, runs Vitest and builds Vite.
-
-See the repository's [Actions page](https://github.com/kartikkamboj380-star/CLOUDFUSION/actions) for actual results and artifacts. A debug APK is signed with the Android debug key; it is **not** a release build. No release-signing workflow is currently implemented. If one is added, store a base64-encoded release keystore, keystore password, alias and key password in GitHub Actions secrets and configure the workflow to consume them; never commit signing material. Detailed guidance is in [deployment](docs/deployment.md).
-
-## Security and privacy
-
-- CloudFusion passwords are salted and hashed with scrypt. Random bearer-session tokens are stored as hashes server-side; Google tokens and resumable-session URLs are encrypted at rest with the configured Fernet key. Android stores its CloudFusion session using Android Keystore; the web companion uses tab-scoped `sessionStorage`.
-- All account and transfer queries are scoped to the authenticated CloudFusion user. The Google account password is never requested by CloudFusion. OAuth credentials and encryption keys stay on the backend.
-- Use HTTPS, protected backups, a strong unique key and database password, restricted server access, and upstream rate limiting. Backend registration has no email verification, password reset, MFA, distributed rate limiter, or administrative controls. Do not expose this as an unrestricted public service without adding them and completing a security review.
-- Disconnect removes credentials from CloudFusion; it does not delete Drive files or automatically revoke Google's grant. Revoke the grant in [Google Account permissions](https://myaccount.google.com/permissions) if desired.
-
-## Known limitations
-
-- Google Workspace-native documents and folders cannot currently be copied across accounts or downloaded as binary files; export and recursive folder copy are not implemented. A folder can still be created, renamed, moved or trashed where Google permits it.
-- Empty-file uploads and cross-account copies are not yet supported. Uploads/copies require a known nonzero size and are capped at 5 TiB. Downloads of ordinary empty files are supported if Google reports their size.
-- File metadata is indexed on explicit refresh, not continuously synchronized. Large Drive accounts can take time and API quota to index. Search/sort/pagination operate on the last successful indexed data; a failed account refresh retains previously indexed rows and reports an error.
-- The backend currently runs **one API worker/instance**. Copies use in-process workers, not a durable queue: a restart marks interrupted copies failed and releases their reservations; retry can resume while Google still accepts the upload session. An expired or ambiguous session may need manual review before starting a new transfer to avoid duplicates. Cancellation takes effect between chunks.
-- Google controls final quota enforcement, sharing permissions, API rates and refresh-token validity. Drive storage usage includes other Google services where Google's quota response does. External account changes can make a recently fetched quota stale.
-- MD5 verification is used only when Google provides checksums; it detects common corruption, not malicious tampering. The web download path currently checks byte count but not MD5. Google-native files may not have binary size or MD5.
-- The app does not implement background Android transfers, unattended server-side scheduling, file version synchronization, permanent deletion, Google Workspace export, release signing, or a durable multi-node job queue.
-
-## Documentation
-
-- [Google Cloud and OAuth setup](docs/google-oauth.md)
+- [Google Cloud OAuth setup](docs/google-oauth.md)
 - [Architecture, allocation and transfers](docs/architecture.md)
-- [Deployment, operations and security](docs/deployment.md)
-
-No real tokens, OAuth client secrets, database passwords or encryption keys belong in the repository. `.env.example` contains placeholders only.
+- [Optional backend deployment and Android signing](docs/deployment.md)
