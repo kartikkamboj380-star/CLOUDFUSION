@@ -29,6 +29,7 @@ local.properties
 # Web
 node_modules/
 dist/
+*.tsbuildinfo
 
 # Miscellaneous
 .DS_Store
