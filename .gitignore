@@ -1,0 +1,34 @@
+# Local credentials and databases
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite3
+*.pem
+*.p12
+*.jks
+*.keystore
+credentials.json
+token.json
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+
+# Web
+node_modules/
+dist/
+
+# Miscellaneous
+.DS_Store
