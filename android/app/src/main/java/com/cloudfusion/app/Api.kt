@@ -54,7 +54,11 @@ class SecureStore(context: Context) {
         } catch (_: Exception) { clearToken(); "" }
     }
 
-    fun clearToken() { prefs.edit().remove("token").remove("iv").apply() }
+    fun clearToken() {
+        val editor = prefs.edit().remove("token").remove("iv")
+        prefs.all.keys.filter { it.startsWith("uri_") }.forEach { editor.remove(it) }
+        editor.apply()
+    }
     fun rememberUri(id: String, uri: Uri) { prefs.edit().putString("uri_$id", uri.toString()).apply() }
     fun uriFor(id: String): Uri? = prefs.getString("uri_$id", null)?.let(Uri::parse)
     fun forgetUri(id: String) { prefs.edit().remove("uri_$id").apply() }

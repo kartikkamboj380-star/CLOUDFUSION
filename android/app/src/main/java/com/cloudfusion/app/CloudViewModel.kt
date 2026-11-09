@@ -65,13 +65,17 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun api() = Api(server, token)
     fun clearMessages() { error = null; notice = null }
-    fun setError(message: String) { error = message }
     private fun launch(showBusy: Boolean = true, block: suspend () -> Unit) = viewModelScope.launch {
         if (showBusy) busy = true
         try { block() } catch (_: CancellationException) {
             notice = "Transfer stopped on this device. Check Transfers to cancel or resume it."
         } catch (e: Exception) {
-            error = e.message ?: "Something went wrong. Please try again."
+            if (e is ApiException && e.code == 401) {
+                store.clearToken(); token = ""; email = ""; accounts = emptyList(); files = emptyList(); transfers = emptyList(); dashboard = null
+                error = "Your CloudFusion session expired. Sign in again."
+            } else {
+                error = e.message ?: "Something went wrong. Please try again."
+            }
         } finally { if (showBusy) busy = false }
     }
 
