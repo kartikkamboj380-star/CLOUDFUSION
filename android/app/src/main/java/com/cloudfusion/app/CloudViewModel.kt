@@ -477,7 +477,10 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     fun pauseUrlTransfer(id: String) {
         val t = transfers.firstOrNull { it.optString("id") == id } ?: return
         if (t.optString("kind") != "url" || t.optString("status") !in listOf("pending", "in_progress")) return
-        if (activeTransferId == id) transferJob?.cancel()
+        if (activeTransferId == id) {
+            transferJob?.cancel()
+            if (t.optString("kind") == "url") urlSources.cancelActive()
+        }
         try {
             changeTransfer(id) { it.put("status", "paused").put("error", "Paused on this device. In-flight requests may finish; resume probes Google's committed offset.") }
         } catch (e: Exception) { error = displayError(e) }
@@ -532,7 +535,10 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelTransfer(id: String) {
         val t = transfers.firstOrNull { it.optString("id") == id } ?: return
         if (t.optString("status") !in listOf("pending", "hashing", "in_progress", "failed", "interrupted", "paused")) return
-        if (activeTransferId == id) transferJob?.cancel()
+        if (activeTransferId == id) {
+            transferJob?.cancel()
+            if (t.optString("kind") == "url") urlSources.cancelActive()
+        }
         try {
             changeTransfer(id) { it.put("status", "cancelled").put("resume_blocked", true).put("error", "Stopped on this phone. An in-flight request may still have completed; check Drive."); it.remove("session_url") }
             notice = "Transfer stopped on this phone. Check Drive for a possible completed file."

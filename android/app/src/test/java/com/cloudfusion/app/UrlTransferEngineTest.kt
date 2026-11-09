@@ -19,6 +19,7 @@ import java.net.InetAddress
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class UrlTransferEngineTest {
     private lateinit var server: MockWebServer
@@ -28,6 +29,9 @@ class UrlTransferEngineTest {
     private var etag = "\"stable\""
     private var badRange = false
     private var status = 200
+    private var rangeDelay = false
+    private val active = AtomicInteger()
+    private val peak = AtomicInteger()
     private val seen = Collections.synchronizedList(mutableListOf<RecordedRequest>())
 
     @Before fun setup() {
@@ -41,10 +45,16 @@ class UrlTransferEngineTest {
                 val match = request.getHeader("Range")?.let { Regex("bytes=([0-9]+)-([0-9]+)").matchEntire(it) }
                 val response = MockResponse().addHeader("ETag", etag).addHeader("Content-Type", "application/octet-stream")
                 if (ranges && match != null) {
+                    if (rangeDelay && request.getHeader("Range") != "bytes=0-0") {
+                        val current = active.incrementAndGet()
+                        peak.updateAndGet { maxOf(it, current) }
+                        try { Thread.sleep(30) } finally { active.decrementAndGet() }
+                    }
                     val from = match.groupValues[1].toInt(); val to = match.groupValues[2].toInt()
                     return response.setResponseCode(206).addHeader("Content-Range", if (badRange) "bytes 0-9/99" else "bytes $from-$to/${data.size}")
                         .setBody(Buffer().write(data, from, to - from + 1))
                 }
+                if (request.path == "/slow") return response.setBody(Buffer().write(data)).throttleBody(1024, 1, TimeUnit.SECONDS)
                 return response.setBody(Buffer().write(data))
             }
         }
@@ -106,9 +116,11 @@ class UrlTransferEngineTest {
 
     @Test fun controlledFiftyRangeConnectionsAssembleOneDriveFile() = runBlocking<Unit> {
         data = ByteArray(1024 * 1024) { (it % 239).toByte() }
+        rangeDelay = true
         val destination = Destination()
         UrlTransferEngine(source).run(info(), null, 50, 1024 * 1024, destination, destination::checkpoint)
         assertEquals(51, seen.size) // preview + exactly 50 disjoint ranges
+        assertTrue("Parallel requests must actually overlap", peak.get() in 2..50)
         assertEquals(1, destination.sends)
         assertEquals(1, destination.creates)
         assertArrayEquals(data, destination.bytes.toByteArray())
@@ -200,6 +212,17 @@ class UrlTransferEngineTest {
         val strict = UrlSourceClient()
         for (value in listOf("file:///etc/passwd", "ftp://host/file", "http://example.com/file", "not a url", "https://user:pass@example.com/file")) {
             assertThrows(Exception::class.java) { strict.inspect(value) }
+        }
+    }
+
+    @Test fun explicitCancelClosesActiveSourceReadWithoutWaitingForWholeFile() {
+        val metadata = info("/slow")
+        source.openWhole(metadata).use { stream ->
+            source.cancelActive()
+            assertThrows(IOException::class.java) {
+                val block = ByteArray(8192)
+                while (stream.input.read(block) >= 0) { /* discard test-only data */ }
+            }
         }
     }
 

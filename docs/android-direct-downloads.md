@@ -48,8 +48,9 @@ and cost sockets/TLS/battery. Use 1 connection + 256 KiB on low-memory phones.
 
 ## Pause, resume, cancellation, restart
 
-- Pause cancels the current coroutine and records `paused`; in-flight reads/uploads may take
-  up to their configured timeout to unwind, and an upload already sent may still complete.
+- Pause cancels the current coroutine, cancels active source sockets (including body reads)
+  and records `paused`; an in-flight Drive upload may take up to its timeout to unwind and
+  may still complete. Source reads have an idle timeout, not a total-file time limit.
   Resume remains blocked while that worker is still stopping.
 - Before sending bytes, persist the Google session URL with existing Android Keystore storage.
   On every resume, **probe Google** and use its committed offset, never merely the saved value.
@@ -84,7 +85,7 @@ No real user's file is deleted/trash/publicized for verification.
 
 `UrlTransferEngineTest` uses a controlled MockWebServer supporting exact ranges and a mock
 Drive target. It exercises small/5-MiB-plus files, 50 disjoint source requests into one upload,
-redirects, HTTP 403/404/429/503, unsupported URLs/private addresses, no-range fallback, lost
+overlapping parallel requests, explicit source socket cancellation, redirects, HTTP 403/404/429/503, unsupported URLs/private addresses, no-range fallback, lost
 acknowledgements/restart/retry, pause/cancellation, unsafe resume rejection, changed ETag,
 wrong ranges, bounded buffers and complete source/destination SHA-256 equality. Existing
 DriveClient tests cover real HTTP request construction with mocked Google responses.

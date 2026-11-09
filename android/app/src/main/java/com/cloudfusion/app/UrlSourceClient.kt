@@ -4,6 +4,9 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
+import okio.ForwardingSource
+import okio.buffer
+import java.util.concurrent.ConcurrentHashMap
 import java.io.Closeable
 import java.io.InputStream
 import java.net.InetAddress
@@ -29,7 +32,8 @@ internal fun publicSourceAddress(address: InetAddress): Boolean {
     if (b.size == 4) return !(b[0] == 0 || b[0] == 10 || b[0] == 127 || b[0] >= 224 ||
         (b[0] == 100 && b[1] in 64..127) || (b[0] == 169 && b[1] == 254) ||
         (b[0] == 172 && b[1] in 16..31) || (b[0] == 192 && b[1] in listOf(0, 168)) ||
-        (b[0] == 198 && b[1] in 18..19))
+        (b[0] == 198 && (b[1] in 18..19 || (b[1] == 51 && b[2] == 100))) ||
+        (b[0] == 203 && b[1] == 0 && b[2] == 113))
     // Only global IPv6 unicast, excluding documentation and transition mechanisms.
     return b.size == 16 && b[0] in 0x20..0x3f && !(b[0] == 0x20 && b[1] == 0x02) &&
         !(b[0] == 0x20 && b[1] == 0x01 && (b[2] == 0 || (b[2] == 0x0d && b[3] == 0xb8)))
@@ -51,9 +55,34 @@ class UrlSourceClient internal constructor(
                     throw java.net.UnknownHostException("Private or special source address blocked")
             }
         }).connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(60, TimeUnit.SECONDS).build(),
+        .callTimeout(0, TimeUnit.SECONDS).build(),
     private val allowed: (HttpUrl) -> Boolean = { it.scheme == "https" && it.port == 443 }
 ) {
+    private val activeCalls = ConcurrentHashMap.newKeySet<Call>()
+    /** Called on explicit pause/cancel; closes source sockets, including active body reads. */
+    fun cancelActive() { activeCalls.forEach { it.cancel() } }
+
+    private fun execute(request: Request): Response {
+        val call = client.newCall(request)
+        activeCalls.add(call)
+        try {
+            val response = call.execute()
+            val original = response.body
+            if (original == null) { activeCalls.remove(call); return response }
+            val tracked = object : ResponseBody() {
+                private val stream = object : ForwardingSource(original.source()) {
+                    override fun close() {
+                        try { super.close() } finally { activeCalls.remove(call) }
+                    }
+                }.buffer()
+                override fun contentType() = original.contentType()
+                override fun contentLength() = original.contentLength()
+                override fun source() = stream
+            }
+            return response.newBuilder().body(tracked).build()
+        } catch (e: Exception) { activeCalls.remove(call); throw e }
+    }
+
     private fun target(value: String): HttpUrl {
         require(value.length in 1..8192 && value.none { it.code <= 32 || it.code == 127 }) { "Enter a valid direct HTTPS file URL." }
         val url = value.toHttpUrlOrNull() ?: throw UrlSourceException("Invalid download URL.")
@@ -68,7 +97,7 @@ class UrlSourceClient internal constructor(
             val builder = Request.Builder().url(url).header("Accept-Encoding", "identity").header("User-Agent", "CloudFusion/0.4")
             headers.forEach { (key, value) -> builder.header(key, value) }
             if (method == "HEAD") builder.head()
-            val response = client.newCall(builder.build()).execute()
+            val response = execute(builder.build())
             if (response.code in listOf(301, 302, 303, 307, 308)) {
                 val location = response.header("Location")
                 response.close()
