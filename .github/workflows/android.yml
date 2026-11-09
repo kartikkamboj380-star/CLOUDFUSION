@@ -1,0 +1,44 @@
+name: Android debug APK
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    # GitHub's Ubuntu 24.04 image includes the Android command-line SDK.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Configure Android SDK
+        run: |
+          test -n "$ANDROID_HOME"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Test and assemble debug APK
+        shell: bash
+        run: |
+          set +e
+          ./gradlew --no-daemon --console plain testDebugUnitTest assembleDebug 2>&1 | tee gradle-build.log
+          result=${PIPESTATUS[0]}
+          if [ "$result" -ne 0 ]; then
+            # Surface compiler diagnostics as check annotations as well as in the full log.
+            python -c 'from pathlib import Path; text="\n".join(Path("gradle-build.log").read_text(errors="replace").splitlines()[-100:]); print("::error title=Gradle output::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' 
+          fi
+          exit "$result"
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CloudFusion-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
