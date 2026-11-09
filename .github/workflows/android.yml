@@ -35,10 +35,18 @@ jobs:
             python -c 'from pathlib import Path; text="\n".join(Path("gradle-build.log").read_text(errors="replace").splitlines()[-100:]); print("::error title=Gradle output::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' 
           fi
           exit "$result"
+      - name: Record the APK signing certificate
+        shell: bash
+        run: |
+          set -o pipefail
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee app/build/outputs/apk/debug/signing-certificate.txt
+          echo "The debug APK's public signing certificate fingerprints are included in the artifact." >> "$GITHUB_STEP_SUMMARY"
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: CloudFusion-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/debug/signing-certificate.txt
           if-no-files-found: error
           retention-days: 14

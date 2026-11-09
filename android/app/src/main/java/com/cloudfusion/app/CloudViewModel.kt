@@ -1,6 +1,8 @@
 package com.cloudfusion.app
 
+import android.accounts.Account
 import android.app.Application
+import android.app.PendingIntent
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
@@ -10,40 +12,63 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.AuthorizationResult
+import com.google.android.gms.auth.api.identity.ClearTokenRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.Scope
+import com.google.android.gms.tasks.Task
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.InputStream
+import java.io.IOException
 import java.security.MessageDigest
-import java.util.Locale
 import java.util.UUID
-import kotlin.math.ln
-import kotlin.math.pow
+import kotlin.coroutines.coroutineContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
-fun formatBytes(value: Long?): String {
-    if (value == null || value < 0) return "Unavailable"
-    if (value < 1024) return "$value B"
-    val exponent = (ln(value.toDouble()) / ln(1024.0)).toInt().coerceAtMost(4)
-    return String.format(Locale.US, "%.1f %s", value / 1024.0.pow(exponent.toDouble()), listOf("B", "KiB", "MiB", "GiB", "TiB")[exponent])
+private suspend fun <T> Task<T>.awaitResult(): T = suspendCancellableCoroutine { continuation ->
+    addOnSuccessListener { if (continuation.isActive) continuation.resume(it) }
+    addOnFailureListener { if (continuation.isActive) continuation.resumeWithException(it) }
+    addOnCanceledListener { continuation.cancel() }
 }
-
-fun JSONObject.text(key: String): String? = if (!has(key) || isNull(key)) null else optString(key)
-fun JSONObject.longOrNull(key: String): Long? = if (!has(key) || isNull(key)) null else optLong(key)
-fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 
 data class DocumentInfo(val uri: Uri, val name: String, val size: Long, val mime: String)
 data class PendingUpload(val transfer: JSONObject, val document: DocumentInfo)
+private data class FileCursor(var page: String? = null, var done: Boolean = false)
+private data class FileQuery(val search: String, val type: String, val sort: String, val direction: String)
+private class ReconnectRequired(email: String) : Exception("Reconnect $email in Accounts to authorize Google Drive again.")
 
 class CloudViewModel(application: Application) : AndroidViewModel(application) {
-    private val store = SecureStore(application)
-    var server by mutableStateOf(store.server); private set
-    var token by mutableStateOf(store.readToken()); private set
-    var email by mutableStateOf(""); private set
+    private val store = LocalStore(application)
+    private val drive = DriveClient()
+    private val authorization = Identity.getAuthorizationClient(application)
+    // Short-lived OAuth tokens are memory-only; Google Play services manages its own cache.
+    private val tokens = mutableMapOf<String, String>()
+    private val tokenMutex = Mutex()
+    private var busyCount = 0
+    private var authEmail: String? = null
+    private var fileJob: Job? = null
+    private val cursors = mutableMapOf<String, FileCursor>()
+    private var loadedQuery: FileQuery? = null
+    private var transferJob: Job? = null
+    private var activeTransferId: String? = null
+
     var busy by mutableStateOf(false); private set
+    var authInProgress by mutableStateOf(false); private set
+    var authorizationResolution by mutableStateOf<PendingIntent?>(null); private set
     var error by mutableStateOf<String?>(null); private set
     var notice by mutableStateOf<String?>(null); private set
     var dashboard by mutableStateOf<JSONObject?>(null); private set
@@ -58,301 +83,597 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     var sort by mutableStateOf("modified")
     var direction by mutableStateOf("desc")
     var fileType by mutableStateOf("all")
-    private var uploadJob: Job? = null
-    private var activeUploadId: String? = null
-    private var downloadJob: Job? = null
-    private var activeDownloadId: String? = null
 
-    private fun api() = Api(server, token)
-    fun clearMessages() { error = null; notice = null }
-    private fun launch(showBusy: Boolean = true, block: suspend () -> Unit) = viewModelScope.launch {
-        if (showBusy) busy = true
-        try { block() } catch (_: CancellationException) {
-            notice = "Transfer stopped on this device. Check Transfers to cancel or resume it."
-        } catch (e: Exception) {
-            if (e is ApiException && e.code == 401) {
-                store.clearToken(); token = ""; email = ""; accounts = emptyList(); files = emptyList(); transfers = emptyList(); dashboard = null
-                error = "Your CloudFusion session expired. Sign in again."
-            } else {
-                error = e.message ?: "Something went wrong. Please try again."
-            }
-        } finally { if (showBusy) busy = false }
-    }
-
-    fun authenticate(rawServer: String, user: String, password: String, register: Boolean) = launch {
-        val normalized = Api.normalizeServer(rawServer)
-        val result = withContext(Dispatchers.IO) {
-            JSONObject(Api(normalized, "").request(if (register) "/api/auth/register" else "/api/auth/login", "POST",
-                JSONObject().put("email", user.trim()).put("password", password)))
-        }
-        server = normalized; store.server = normalized
-        token = result.getString("token"); store.saveToken(token)
-        email = result.optString("email")
-        notice = "Signed in. Connect a Google account to get started."
-        refreshAll()
-    }
-
-    fun saveServer(raw: String) {
+    init {
+        store.removeLegacySession()
         try {
-            val normalized = Api.normalizeServer(raw)
-            if (normalized != server) {
-                store.clearToken(); token = ""; email = ""; accounts = emptyList(); files = emptyList(); dashboard = null
-            }
-            server = normalized; store.server = normalized
-            notice = "Server saved. Sign in again when changing servers."
-        } catch (e: Exception) { error = e.message }
-    }
-
-    fun logout() = launch {
-        try { withContext(Dispatchers.IO) { api().request("/api/auth/logout", "POST") } } catch (_: Exception) { }
-        store.clearToken(); token = ""; email = ""; accounts = emptyList(); files = emptyList(); transfers = emptyList(); dashboard = null
-        notice = "Signed out on this device."
-    }
-
-    fun refreshAll() = launch {
-        val result = withContext(Dispatchers.IO) {
-            val api = api()
-            val me = JSONObject(api.request("/api/auth/me"))
-            val acc = JSONArray(api.request("/api/accounts")).objects()
-            val dash = JSONObject(api.request("/api/dashboard"))
-            val trans = JSONObject(api.request("/api/transfers")).getJSONArray("items").objects()
-            listOf(me, JSONArray(acc), dash, JSONArray(trans))
+            val saved = store.read()
+            accounts = saved.optJSONArray("accounts")?.objects()?.mapNotNull { item ->
+                item.text("email")?.let(::unknownAccount)
+            } ?: emptyList()
+            transfers = saved.optJSONArray("transfers")?.objects()?.map { t ->
+                if (t.optString("status") in listOf("pending", "in_progress", "hashing")) {
+                    t.put("status", "interrupted").put("error", if (t.optString("kind") == "download") "Stopped when the app closed. A partial local file may remain; download again." else "Stopped when the app closed. Resume while the Google session is valid.")
+                }
+                t
+            } ?: emptyList()
+        } catch (_: Exception) {
+            error = "Saved local state could not be read. Reconnect your Google accounts; Drive files were not deleted."
         }
-        email = (result[0] as JSONObject).optString("email")
-        accounts = (result[1] as JSONArray).objects()
-        dashboard = result[2] as JSONObject
-        transfers = (result[3] as JSONArray).objects()
+        updateDashboard()
+    }
+
+    private fun unknownAccount(email: String) = JSONObject().put("id", email).put("email", email)
+        .put("used_bytes", JSONObject.NULL).put("limit_bytes", JSONObject.NULL).put("free_bytes", JSONObject.NULL)
+        .put("unlimited", false).put("quota_error", "Refresh quota")
+
+    private fun quota(account: JSONObject) = QuotaSnapshot(
+        account.optString("id"), account.longOrNull("used_bytes"), account.longOrNull("limit_bytes"),
+        account.optBoolean("unlimited"), account.text("quota_error") == null && !account.optBoolean("reauthorization_required")
+    )
+
+    private fun accountFromAbout(email: String, about: JSONObject): JSONObject {
+        val returned = about.optJSONObject("user")?.text("emailAddress")
+        check(sameGoogleAccount(email, returned)) { "Google returned a different or unknown account. No data was associated; select the intended account again." }
+        val q = about.optJSONObject("storageQuota")
+        val used = q?.longOrNull("usage")
+        val limit = q?.longOrNull("limit")
+        val unlimited = q != null && (!q.has("limit") || q.isNull("limit"))
+        val valid = used != null && used >= 0 && (unlimited || (limit != null && limit >= 0))
+        return JSONObject().put("id", email).put("email", email)
+            .put("used_bytes", used ?: JSONObject.NULL).put("limit_bytes", limit ?: JSONObject.NULL)
+            .put("free_bytes", if (valid && !unlimited) (limit!! - used!!).coerceAtLeast(0) else JSONObject.NULL)
+            .put("unlimited", unlimited && valid).put("reauthorization_required", false)
+            .put("quota_error", if (valid) JSONObject.NULL else "Google did not provide a complete quota.")
+    }
+
+    private fun updateDashboard() {
+        val aggregate = aggregateQuota(accounts.map(::quota))
+        val used = aggregate.used
+        val capacity = aggregate.capacity
+        val percent = if (used != null && capacity != null && capacity > 0) used.toDouble() * 100 / capacity else null
+        dashboard = JSONObject().put("used_bytes", used ?: JSONObject.NULL).put("capacity_bytes", capacity ?: JSONObject.NULL)
+            .put("remaining_bytes", aggregate.remaining ?: JSONObject.NULL).put("utilization_percent", percent ?: JSONObject.NULL)
+            .put("connected_accounts", accounts.size)
+            .put("active_transfers", transfers.count { it.optString("status") in listOf("pending", "hashing", "in_progress") })
+            .put("failed_transfers", transfers.count { it.optString("status") in listOf("failed", "interrupted", "review_required") })
+            .put("recent_files", JSONArray(files.take(4))).put("recent_transfers", JSONArray(transfers.take(4)))
+    }
+
+    private fun persist() {
+        val accountIds = JSONArray()
+        accounts.forEach { accountIds.put(JSONObject().put("email", it.optString("email"))) }
+        store.write(JSONObject().put("accounts", accountIds).put("transfers", JSONArray(transfers)))
+    }
+
+    fun clearMessages() { error = null; notice = null }
+    fun showError(message: String) { error = message }
+    private fun displayError(e: Exception): String = when (e) {
+        is ApiException -> "Google Play services authorization failed (code ${e.statusCode}). Check the Android OAuth package, signing SHA-1, Drive API and test-user setup."
+        is IOException -> "Network or file I/O failed. Resume later and check Drive before starting a replacement."
+        else -> e.message ?: "Something went wrong. Please try again."
+    }
+    private fun launch(showBusy: Boolean = true, block: suspend () -> Unit): Job = viewModelScope.launch {
+        if (showBusy) { busyCount++; busy = true }
+        try { block() }
+        catch (_: CancellationException) { }
+        catch (e: Exception) { error = displayError(e) }
+        finally { if (showBusy) { busyCount--; busy = busyCount > 0 } }
+    }
+
+    private fun requestFor(email: String): AuthorizationRequest = AuthorizationRequest.builder()
+        .setAccount(Account(email, "com.google")).setRequestedScopes(listOf(Scope(DRIVE_SCOPE))).build()
+
+    /** Called only after the user explicitly picks an account (or presses Reconnect). */
+    fun connectAccount(email: String) {
+        if (authInProgress) return
+        authEmail = email.trim()
+        if (authEmail.isNullOrBlank()) { error = "Google did not return an account. Try again."; return }
+        authInProgress = true
+        launch {
+            try {
+                val result = authorization.authorize(requestFor(authEmail!!)).awaitResult()
+                if (result.hasResolution()) {
+                    authorizationResolution = result.pendingIntent ?: throw IllegalStateException("Google did not provide a consent screen.")
+                } else {
+                    completeAuthorization(result)
+                }
+            } catch (e: Exception) {
+                authEmail = null; authInProgress = false; throw e
+            }
+        }
+    }
+
+    fun consumeAuthorizationResolution(): PendingIntent? = authorizationResolution.also { authorizationResolution = null }
+    fun authorizationCancelled() {
+        authorizationResolution = null; authEmail = null; authInProgress = false
+        notice = "Google authorization was cancelled. No account was connected."
+    }
+    fun finishAuthorization(data: Intent?) {
+        if (authEmail == null) { authorizationCancelled(); return }
+        launch {
+            try { completeAuthorization(authorization.getAuthorizationResultFromIntent(data)) }
+            catch (e: Exception) { authEmail = null; authInProgress = false; throw e }
+        }
+    }
+
+    private suspend fun completeAuthorization(result: AuthorizationResult) {
+        val email = authEmail ?: throw IllegalStateException("Select the Google account again.")
+        val token = result.accessToken?.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("Google did not grant a Drive access token. Try connecting again.")
+        val about = withContext(Dispatchers.IO) { drive.about(token) }
+        val account = accountFromAbout(email, about) // Identity checked before accepting or storing the token.
+        val existing = accounts.firstOrNull { it.optString("id").equals(email, true) }
+        if (existing != null) {
+            val id = existing.getString("id")
+            account.put("id", id).put("email", id)
+            accounts = accounts.map { if (it.optString("id") == id) account else it }
+            tokens[id] = token
+        } else {
+            accounts = accounts + account
+            tokens[email] = token
+        }
+        persist(); updateDashboard()
+        authEmail = null; authInProgress = false
+        notice = "Google account connected directly. Your accounts remain separate."
         loadFiles()
     }
 
+    private fun markReconnect(email: String) {
+        accounts = accounts.map {
+            if (it.optString("id") == email) JSONObject(it.toString()).put("reauthorization_required", true)
+                .put("quota_error", "Reconnect this account") else it
+        }
+        updateDashboard()
+    }
+
+    private suspend fun clearCachedToken(token: String) {
+        try { authorization.clearToken(ClearTokenRequest.builder().setToken(token).build()).awaitResult() }
+        catch (e: CancellationException) { throw e }
+        catch (_: Exception) { /* The subsequent authorization may still require user action. */ }
+    }
+
+    private suspend fun getToken(email: String): String = tokenMutex.withLock { getTokenUnlocked(email) }
+
+    private suspend fun getTokenUnlocked(email: String, retry: Boolean = true): String {
+        tokens[email]?.let { return it }
+        val result = authorization.authorize(requestFor(email)).awaitResult()
+        if (result.hasResolution()) { markReconnect(email); throw ReconnectRequired(email) }
+        val token = result.accessToken?.takeIf { it.isNotBlank() } ?: run { markReconnect(email); throw ReconnectRequired(email) }
+        try {
+            val about = withContext(Dispatchers.IO) { drive.about(token) }
+            accountFromAbout(email, about) // Do not allow a token for another account to touch data.
+        } catch (e: DriveException) {
+            if (e.code == 401 && retry) { clearCachedToken(token); return getTokenUnlocked(email, false) }
+            throw e
+        }
+        tokens[email] = token
+        return token
+    }
+
+    private suspend fun <T> withDrive(email: String, operation: (String) -> T): T {
+        check(accounts.any { it.optString("id") == email }) { "Reconnect the required Google account first." }
+        val token = getToken(email)
+        try { return withContext(Dispatchers.IO) { operation(token) } }
+        catch (e: DriveException) {
+            if (e.code != 401) throw e
+            tokens.remove(email); clearCachedToken(token)
+            val fresh = getToken(email)
+            return withContext(Dispatchers.IO) { operation(fresh) }
+        }
+    }
+
+    fun disconnect(id: String) {
+        val active = transfers.firstOrNull { it.optString("id") == activeTransferId }
+        if (active != null && (active.optString("source_account_id") == id || active.optString("destination_account_id") == id)) {
+            error = "Cancel the active transfer before disconnecting this account."; return
+        }
+        launch {
+            tokens.remove(id)?.let { clearCachedToken(it) }
+            accounts = accounts.filterNot { it.optString("id") == id }
+            transfers = transfers.map { t ->
+                if (t.optString("source_account_id") == id || t.optString("destination_account_id") == id) {
+                    if (t.optString("status") in listOf("failed", "interrupted", "pending", "in_progress")) {
+                        JSONObject(t.toString()).put("status", "review_required").put("resume_blocked", true)
+                            .put("error", "Account disconnected; inspect Drive before starting a replacement.").also { it.remove("session_url") }
+                    } else t
+                } else t
+            }
+            if (uploadAccountId == id) uploadAccountId = null
+            files = files.filterNot { it.optString("account_id") == id }
+            persist(); updateDashboard()
+            notice = "Account removed from this device. Your Drive files and Google's authorization remain unchanged."
+            loadFiles()
+        }
+    }
+
+    fun refreshAll() = launch { refreshAccountsNow(); loadFiles() }
     fun refreshAccounts(remote: Boolean = false) = launch {
-        val result = withContext(Dispatchers.IO) {
-            val api = api()
-            val list = JSONArray(api.request(if (remote) "/api/accounts/refresh" else "/api/accounts", if (remote) "POST" else "GET")).objects()
-            list to JSONObject(api.request("/api/dashboard"))
+        val failed = refreshAccountsNow()
+        if (remote) notice = when {
+            accounts.isEmpty() -> "Connect a Google account before refreshing quotas."
+            failed > 0 -> "Some accounts could not refresh. Check Accounts and reconnect if needed."
+            else -> "Account quotas refreshed directly from Google Drive."
         }
-        accounts = result.first; dashboard = result.second
-        if (remote) notice = if (accounts.isEmpty()) "Connect a Google account before refreshing quotas." else "Account quotas refreshed."
     }
-
-    fun connectAccount(open: (Uri) -> Unit) = launch {
-        val url = withContext(Dispatchers.IO) { JSONObject(api().request("/api/oauth/start", "POST")).getString("authorization_url") }
-        val uri = Uri.parse(url)
-        require(uri.scheme == "https" && uri.host == "accounts.google.com") { "Unexpected Google authorization URL" }
-        open(uri)
-    }
-
-    fun disconnect(id: String) = launch {
-        withContext(Dispatchers.IO) { api().request("/api/accounts/$id", "DELETE") }
-        notice = "Account disconnected from CloudFusion."
-        refreshAll()
-    }
-
-    fun loadFiles(more: Boolean = false, sync: Boolean = false) = launch {
-        val offset = if (more) nextOffset ?: return@launch else 0
-        val url = "/api/files?search=${Uri.encode(search)}&sort=$sort&direction=$direction&type=$fileType&limit=30&offset=$offset"
-        val result = withContext(Dispatchers.IO) {
-            val api = api()
-            val syncResult = if (sync) JSONObject(api.request("/api/files/sync", "POST")) else null
-            JSONObject(api.request(url)) to syncResult
-        }
-        val items = result.first.getJSONArray("items").objects()
-        files = if (more) files + items else items
-        nextOffset = if (result.first.isNull("next_offset")) null else result.first.optInt("next_offset")
-        result.second?.let { synced ->
-            val refreshed = synced.getJSONArray("accounts").objects()
-            val failures = refreshed.mapNotNull { it.text("error") }
-            notice = when {
-                refreshed.isEmpty() -> "Connect a Google account before refreshing files."
-                failures.isEmpty() -> "Files refreshed from Google Drive."
-                else -> "Some accounts could not refresh: ${failures.joinToString()}"
+    private suspend fun refreshAccountsNow(): Int {
+        var failures = 0
+        for (account in accounts.toList()) {
+            val id = account.getString("id")
+            try {
+                val about = withDrive(id) { drive.about(it) }
+                val updated = accountFromAbout(id, about)
+                accounts = accounts.map { if (it.optString("id") == id) updated else it }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                failures++
+                val failed = unknownAccount(id).put("quota_error", displayError(e))
+                    .put("reauthorization_required", e is ReconnectRequired || (e is DriveException && e.code == 401))
+                accounts = accounts.map { if (it.optString("id") == id) failed else it }
             }
         }
+        updateDashboard()
+        return failures
     }
 
-    fun rename(file: JSONObject, name: String) = mutateFile(file, "PATCH", "", JSONObject().put("name", name), "File renamed.")
-    fun move(file: JSONObject, parent: String) = mutateFile(file, "POST", "/move", JSONObject().put("parent_id", parent), "File moved.")
-    fun trash(file: JSONObject) = mutateFile(file, "DELETE", "", null, "File moved to Google Drive trash.")
-    private fun mutateFile(file: JSONObject, method: String, suffix: String, body: JSONObject?, success: String) = launch {
-        withContext(Dispatchers.IO) { api().request("/api/files/${file.getString("account_id")}/${file.getString("id")}$suffix", method, body) }
+    private fun mapFile(account: String, f: JSONObject): JSONObject {
+        val owners = f.optJSONArray("owners")?.objects().orEmpty()
+        return JSONObject().put("id", f.getString("id")).put("account_id", account).put("account_email", account)
+            .put("name", f.optString("name", "Untitled")).put("mime_type", f.optString("mimeType", "application/octet-stream"))
+            .put("size", f.longOrNull("size") ?: JSONObject.NULL).put("md5_checksum", f.text("md5Checksum") ?: JSONObject.NULL)
+            .put("modified_time", f.text("modifiedTime") ?: JSONObject.NULL).put("version", f.text("version") ?: JSONObject.NULL)
+            .put("owner_email", owners.firstOrNull()?.text("emailAddress") ?: JSONObject.NULL)
+            .put("web_view_link", f.text("webViewLink") ?: JSONObject.NULL)
+    }
+
+    fun loadFiles(more: Boolean = false, sync: Boolean = false) {
+        fileJob?.cancel()
+        val query = FileQuery(search, fileType, sort, direction)
+        fileJob = launch {
+            val canContinue = more && loadedQuery == query
+            // Work on copies: cancelling an in-flight refresh must not advance page tokens without committing its files.
+            val nextCursors = if (canContinue) cursors.mapValues { (_, value) -> value.copy() }.toMutableMap()
+                else accounts.associate { it.getString("id") to FileCursor() }.toMutableMap()
+            val merged = (if (canContinue) files else emptyList()).toMutableList()
+            var failures = 0
+            for ((id, cursor) in nextCursors) {
+                if (cursor.done || accounts.none { it.optString("id") == id }) continue
+                try {
+                    val result = withDrive(id) { drive.listFiles(it, query.search, query.type, query.sort, query.direction, cursor.page) }
+                    val newItems = result.optJSONArray("files")?.objects().orEmpty().map { mapFile(id, it) }
+                    newItems.forEach { item ->
+                        if (merged.none { it.optString("id") == item.optString("id") && it.optString("account_id") == id }) merged.add(item)
+                    }
+                    cursor.page = result.text("nextPageToken"); cursor.done = cursor.page == null
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { failures++; cursor.done = true }
+            }
+            val comparator = Comparator<JSONObject> { a, b ->
+                when (query.sort) {
+                    "name" -> a.optString("name").compareTo(b.optString("name"), ignoreCase = true)
+                    "size" -> (a.longOrNull("size") ?: -1).compareTo(b.longOrNull("size") ?: -1)
+                    else -> a.optString("modified_time").compareTo(b.optString("modified_time"))
+                }
+            }
+            files = if (query.direction == "desc") merged.sortedWith(comparator.reversed()) else merged.sortedWith(comparator)
+            cursors.clear(); cursors.putAll(nextCursors); loadedQuery = query
+            nextOffset = if (cursors.values.any { !it.done }) files.size else null
+            updateDashboard()
+            if (failures > 0) notice = "Files from $failures account(s) could not be loaded. Check Accounts, then refresh files."
+            else if (sync) notice = if (accounts.isEmpty()) "Connect a Google account first." else "Files refreshed directly from Google Drive."
+        }
+    }
+
+    fun rename(file: JSONObject, name: String) = mutateFile(file, JSONObject().put("name", name), "File renamed.")
+    fun trash(file: JSONObject) = mutateFile(file, JSONObject().put("trashed", true), "File moved to Google Drive trash.")
+    private fun mutateFile(file: JSONObject, body: JSONObject, success: String) = launch {
+        withDrive(file.getString("account_id")) { drive.updateFile(it, file.getString("id"), body) }
         notice = success; loadFiles()
     }
+    fun move(file: JSONObject, parent: String) = launch {
+        val account = file.getString("account_id"); val id = file.getString("id")
+        val current = withDrive(account) { drive.getFile(it, id) }
+        val parents = current.optJSONArray("parents")?.let { array -> (0 until array.length()).map { array.getString(it) }.joinToString(",") }
+        withDrive(account) { drive.updateFile(it, id, JSONObject(), parent.ifBlank { "root" }, parents) }
+        notice = "File moved within its Google Drive."; loadFiles()
+    }
     fun createFolder(accountId: String, name: String, parent: String) = launch {
-        val body = JSONObject().put("account_id", accountId).put("name", name)
-        if (parent.isNotBlank()) body.put("parent_id", parent.trim())
-        withContext(Dispatchers.IO) { api().request("/api/files/folders", "POST", body) }
+        withDrive(accountId) { drive.createFolder(it, name, parent) }
         notice = "Folder created."; loadFiles()
     }
-    fun copy(file: JSONObject, destination: String) = launch {
-        val body = JSONObject().put("source_account_id", file.getString("account_id"))
-            .put("source_file_id", file.getString("id")).put("destination_account_id", destination)
-            .put("idempotency_key", UUID.randomUUID().toString())
-        withContext(Dispatchers.IO) { api().request("/api/transfers/copy", "POST", body) }
-        notice = "Copy started on the backend. Track it in Transfers."; refreshTransfers()
-    }
-
     fun getSharing(file: JSONObject, onResult: (JSONObject) -> Unit) = launch {
-        val result = withContext(Dispatchers.IO) { JSONObject(api().request("/api/files/${file.getString("account_id")}/${file.getString("id")}/permissions")) }
-        onResult(result)
+        onResult(withDrive(file.getString("account_id")) { drive.permissions(it, file.getString("id")) })
     }
     fun changeSharing(file: JSONObject, public: Boolean, onResult: (JSONObject) -> Unit) = launch {
-        val result = withContext(Dispatchers.IO) {
-            JSONObject(api().request("/api/files/${file.getString("account_id")}/${file.getString("id")}/public",
-                if (public) "POST" else "DELETE", if (public) JSONObject().put("confirm_public", true) else null))
-        }
-        onResult(result)
-        notice = if (public) "Public link enabled." else "Public access revoked."
+        val account = file.getString("account_id"); val id = file.getString("id")
+        if (public) withDrive(account) { drive.makePublic(it, id) } else withDrive(account) { drive.revokePublic(it, id) }
+        onResult(withDrive(account) { drive.permissions(it, id) })
+        notice = if (public) "Public link enabled." else "Public access revoked where Google allowed it."
     }
 
     private fun documentInfo(uri: Uri): DocumentInfo {
         val resolver = getApplication<Application>().contentResolver
-        var name: String? = null
-        var size: Long? = null
+        var name: String? = null; var size: Long? = null
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c: Cursor ->
             if (c.moveToFirst()) {
-                val nameIndex = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                val sizeIndex = c.getColumnIndex(OpenableColumns.SIZE)
-                if (nameIndex >= 0 && !c.isNull(nameIndex)) name = c.getString(nameIndex)
-                if (sizeIndex >= 0 && !c.isNull(sizeIndex)) size = c.getLong(sizeIndex)
+                val n = c.getColumnIndex(OpenableColumns.DISPLAY_NAME); val s = c.getColumnIndex(OpenableColumns.SIZE)
+                if (n >= 0 && !c.isNull(n)) name = c.getString(n)
+                if (s >= 0 && !c.isNull(s)) size = c.getLong(s)
             }
         }
-        require(size != null && size!! > 0L) { "Choose a non-empty file with a known size." }
-        return DocumentInfo(uri, name ?: "upload", size!!, resolver.getType(uri) ?: "application/octet-stream")
+        require(size != null && size!! in 1..MAX_TRANSFER_SIZE) { "Choose a non-empty file with a known size up to 5 TiB." }
+        val mime = resolver.getType(uri)?.takeIf { it.isNotBlank() && !isWorkspaceNative(it) } ?: "application/octet-stream"
+        return DocumentInfo(uri, name?.takeIf { it.isNotBlank() } ?: "upload", size!!, mime)
     }
 
     fun prepareUpload(uri: Uri) = launch {
-        try { getApplication<Application>().contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: SecurityException) { }
-        val result = withContext(Dispatchers.IO) {
-            val doc = documentInfo(uri)
-            val body = JSONObject().put("name", doc.name).put("size", doc.size).put("mime_type", doc.mime)
-                .put("idempotency_key", UUID.randomUUID().toString())
-            uploadAccountId?.let { body.put("account_id", it) }
-            doc to JSONObject(api().request("/api/uploads", "POST", body))
-        }
-        store.rememberUri(result.second.getString("id"), uri)
-        pendingUpload = PendingUpload(result.second, result.first)
+        try { getApplication<Application>().contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        catch (_: SecurityException) { /* The user can select the file again when resuming. */ }
+        val document = withContext(Dispatchers.IO) { documentInfo(uri) }
+        refreshAccountsNow()
+        val destination = chooseDestination(accounts.map(::quota), document.size, uploadAccountId)
+            ?: throw IllegalStateException("No selected account has a known quota with enough space. Refresh accounts or choose another destination.")
+        val transfer = JSONObject().put("id", UUID.randomUUID().toString()).put("kind", "upload")
+            .put("name", document.name).put("size", document.size).put("mime_type", document.mime)
+            .put("destination_account_id", destination.id).put("source_uri", uri.toString())
+            .put("bytes_transferred", 0).put("status", "pending")
+        pendingUpload = PendingUpload(transfer, document)
     }
-
-    fun cancelPendingUpload() {
-        val pending = pendingUpload ?: return
-        pendingUpload = null
-        cancelTransfer(pending.transfer.getString("id"))
-    }
+    fun cancelPendingUpload() { pendingUpload = null }
     fun confirmUpload() {
         val pending = pendingUpload ?: return
-        pendingUpload = null
-        startUpload(pending.transfer, pending.document.uri)
+        if (transferJob?.isCompleted == false) { error = "A transfer is already running on this device."; return }
+        pendingUpload = null; transfers = listOf(pending.transfer) + transfers
+        try { persist(); updateDashboard(); startTransfer(pending.transfer.getString("id")) }
+        catch (e: Exception) { error = displayError(e) }
+    }
+
+    fun copy(file: JSONObject, destination: String) = launch {
+        check(transferJob?.isCompleted != false) { "A transfer is already running on this device." }
+        val source = file.getString("account_id")
+        require(source != destination) { "Choose a different destination account." }
+        val mime = file.optString("mime_type")
+        require(!isWorkspaceNative(mime)) { "Folders and Google Workspace documents cannot be copied as binary files." }
+        val size = file.longOrNull("size")
+        require(size != null && size in 1..MAX_TRANSFER_SIZE) { "Copy requires a known, non-empty file size up to 5 TiB." }
+        val checksum = file.text("md5_checksum") ?: throw IllegalStateException("Google did not provide a source checksum; this copy cannot be verified safely.")
+        refreshAccountsNow()
+        check(chooseDestination(accounts.map(::quota), size, destination) != null) { "Destination quota is unknown or does not have enough free space." }
+        val t = JSONObject().put("id", UUID.randomUUID().toString()).put("kind", "copy").put("name", file.optString("name"))
+            .put("mime_type", mime).put("size", size).put("source_account_id", source).put("source_file_id", file.getString("id"))
+            .put("destination_account_id", destination).put("expected_md5", checksum).put("bytes_transferred", 0).put("status", "pending")
+        transfers = listOf(t) + transfers; persist(); updateDashboard(); startTransfer(t.getString("id"))
+    }
+
+    private fun transfer(id: String): JSONObject = transfers.firstOrNull { it.optString("id") == id }
+        ?: throw IllegalStateException("Transfer not found.")
+    private fun changeTransfer(id: String, change: (JSONObject) -> Unit) {
+        transfers = transfers.map { old -> if (old.optString("id") == id) JSONObject(old.toString()).also(change) else old }
+        persist(); updateDashboard()
     }
 
     fun resumeUpload(t: JSONObject, chosen: Uri? = null) {
-        val uri = chosen ?: store.uriFor(t.getString("id"))
+        if (t.optBoolean("resume_blocked")) { error = "Review the destination in Drive before starting a replacement."; return }
+        val uri = chosen ?: t.text("source_uri")?.let(Uri::parse)
+        if (uri == null) { error = "Select the original file to resume."; return }
         if (chosen != null) {
             try { getApplication<Application>().contentResolver.takePersistableUriPermission(chosen, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: SecurityException) { }
-            store.rememberUri(t.getString("id"), chosen)
         }
-        if (uri == null) { error = "The original file is no longer available. Select it again to resume."; return }
-        startUpload(t, uri)
+        startTransfer(t.getString("id"), uri)
+    }
+    fun retryTransfer(t: JSONObject) {
+        if (t.optBoolean("resume_blocked")) { error = "Review the destination in Drive before starting a replacement."; return }
+        if (t.optString("kind") == "copy") startTransfer(t.getString("id")) else resumeUpload(t)
     }
 
-    private fun startUpload(t: JSONObject, uri: Uri) {
-        if (uploadJob?.isActive == true) { error = "An upload is already running on this device."; return }
-        val id = t.getString("id")
-        activeUploadId = id
-        uploadJob = launch {
+    fun cancelTransfer(id: String) {
+        val t = transfers.firstOrNull { it.optString("id") == id } ?: return
+        if (t.optString("status") !in listOf("pending", "hashing", "in_progress", "failed", "interrupted")) return
+        if (activeTransferId == id) transferJob?.cancel()
+        try {
+            changeTransfer(id) { it.put("status", "cancelled").put("resume_blocked", true).put("error", "Stopped on this phone. An in-flight request may still have completed; check Drive."); it.remove("session_url") }
+            notice = "Transfer stopped on this phone. Check Drive for a possible completed file."
+        } catch (e: Exception) { error = displayError(e) }
+    }
+
+    private fun startTransfer(id: String, selectedUri: Uri? = null) {
+        if (transferJob?.isCompleted == false) { error = "A transfer is already running on this device."; return }
+        activeTransferId = id
+        transferJob = viewModelScope.launch {
             try {
-            val result = withContext(Dispatchers.IO) {
-                val api = api()
-                var current = JSONObject(api.request("/api/transfers/$id"))
-                if (current.optString("status") == "failed") current = JSONObject(api.request("/api/transfers/$id/retry", "POST"))
-                val doc = documentInfo(uri)
-                require(doc.size == current.getLong("size") && doc.name == current.getString("name")) { "Select the original file with the same name and size." }
-                val digest = MessageDigest.getInstance("MD5")
-                val input = getApplication<Application>().contentResolver.openInputStream(uri) ?: throw IllegalStateException("Could not open the selected file")
-                input.use { stream ->
-                    var offset = current.getLong("bytes_transferred")
-                    var consumed = 0L
-                    val buffer = ByteArray(4 * 1024 * 1024)
-                    while (consumed < offset) {
-                        ensureActive()
-                        val n = stream.read(buffer, 0, minOf(buffer.size.toLong(), offset - consumed).toInt())
-                        require(n > 0) { "The selected file ended before the resume point." }
-                        digest.update(buffer, 0, n); consumed += n
+                runTransfer(id, selectedUri)
+            } catch (_: CancellationException) {
+                // cancelTransfer records the state. Process death is detected at next launch.
+            } catch (e: Exception) {
+                val blocked = e is DriveException && e.code in listOf(404, 410)
+                try {
+                    changeTransfer(id) {
+                        it.put("status", if (blocked) "review_required" else "failed").put("error", displayError(e))
+                        if (blocked) it.put("resume_blocked", true)
                     }
-                    while (offset < doc.size) {
-                        ensureActive()
-                        val wanted = minOf(buffer.size.toLong(), doc.size - offset).toInt()
-                        var read = 0
-                        while (read < wanted) {
-                            val n = stream.read(buffer, read, wanted - read)
-                            require(n > 0) { "The selected file ended unexpectedly." }
-                            read += n
+                } catch (_: Exception) { }
+                error = displayError(e)
+            } finally {
+                activeTransferId = null; transferProgress = null
+                refreshAccounts()
+            }
+        }
+    }
+
+    private suspend fun hashDocument(uri: Uri, expectedSize: Long): String = withContext(Dispatchers.IO) {
+        val digest = MessageDigest.getInstance("MD5"); var total = 0L
+        val input = getApplication<Application>().contentResolver.openInputStream(uri) ?: throw IllegalStateException("Could not open the selected file.")
+        input.use { stream ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                coroutineContext.ensureActive()
+                val n = stream.read(buffer)
+                if (n < 0) break
+                if (n == 0) continue
+                total += n; check(total <= expectedSize) { "The selected file changed size." }
+                digest.update(buffer, 0, n)
+            }
+        }
+        check(total == expectedSize) { "The selected file changed size or could not be read completely." }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private suspend fun skipTo(input: InputStream, offset: Long) = withContext(Dispatchers.IO) {
+        val buffer = ByteArray(64 * 1024); var remaining = offset
+        while (remaining > 0) {
+            coroutineContext.ensureActive()
+            val skipped = input.skip(remaining)
+            if (skipped > 0) remaining -= skipped
+            else {
+                val n = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                check(n > 0) { "The selected file ended before the resume point." }; remaining -= n
+            }
+        }
+    }
+    private suspend fun readChunk(input: InputStream, size: Int): ByteArray = withContext(Dispatchers.IO) {
+        val buffer = ByteArray(size); var read = 0
+        while (read < size) {
+            coroutineContext.ensureActive()
+            val n = input.read(buffer, read, size - read)
+            check(n > 0) { "The selected file ended unexpectedly." }; read += n
+        }
+        buffer
+    }
+
+    private suspend fun runTransfer(id: String, selectedUri: Uri?) {
+        var t = transfer(id)
+        val kind = t.getString("kind"); val size = t.getLong("size"); val destination = t.getString("destination_account_id")
+        require(size in 1..MAX_TRANSFER_SIZE)
+        val uri = if (kind == "upload") selectedUri ?: t.text("source_uri")?.let(Uri::parse) else null
+        if (kind == "upload") {
+            check(uri != null) { "Select the original file to resume." }
+            changeTransfer(id) { it.put("status", "hashing").remove("error") }
+            transferProgress = "Checking the selected file before upload…"
+            val info = withContext(Dispatchers.IO) { documentInfo(uri) }
+            check(info.size == size && info.name == t.getString("name")) { "Select the original file with the same name and size." }
+            val digest = hashDocument(uri, size)
+            val previous = t.text("expected_md5")
+            check(previous == null || previous.equals(digest, true)) { "Selected file content differs from the original. Upload was not resumed." }
+            changeTransfer(id) { it.put("expected_md5", digest).put("source_uri", uri.toString()) }
+        } else {
+            val sourceAccount = t.getString("source_account_id")
+            val source = withDrive(sourceAccount) { drive.getFile(it, t.getString("source_file_id")) }
+            check(source.longOrNull("size") == size && source.text("md5Checksum")?.equals(t.text("expected_md5"), true) == true) {
+                "The source file changed or its checksum is unavailable. Copy stopped; review Drive."
+            }
+        }
+        t = transfer(id)
+        var session = t.text("session_url")
+        if (session == null) {
+            session = withDrive(destination) { drive.startUpload(it, t.getString("name"), t.getString("mime_type"), size) }
+            val savedSession = session
+            changeTransfer(id) { it.put("session_url", savedSession) } // Persist before sending bytes.
+        }
+        changeTransfer(id) { it.put("status", "in_progress").remove("error") }
+        val location = requireNotNull(session)
+        val probe = withDrive(destination) { drive.probeUpload(it, location, size) }
+        if (probe is UploadReply.Complete) { finishTransfer(id, probe.file); return }
+        var offset = (probe as UploadReply.Incomplete).offset
+        check(offset < size) { "Google has all bytes but has not confirmed the file. Resume later and check Drive before starting again." }
+        changeTransfer(id) { it.put("bytes_transferred", offset) }
+        val stream = if (kind == "upload") withContext(Dispatchers.IO) {
+            getApplication<Application>().contentResolver.openInputStream(uri!!) ?: throw IllegalStateException("Could not open the selected file.")
+        } else null
+        try {
+            if (stream != null) skipTo(stream, offset)
+            while (offset < size) {
+                coroutineContext.ensureActive()
+                val count = minOf(CHUNK_SIZE.toLong(), size - offset).toInt()
+                val bytes = if (stream != null) readChunk(stream, count) else {
+                    val sourceAccount = t.getString("source_account_id")
+                    withDrive(sourceAccount) { drive.downloadRange(it, t.getString("source_file_id"), offset, offset + count - 1, size) }
+                }
+                val start = offset
+                val reply = withDrive(destination) { drive.sendChunk(it, location, start, size, t.getString("mime_type"), bytes) }
+                when (reply) {
+                    is UploadReply.Incomplete -> {
+                        if (reply.offset != start + count) {
+                            changeTransfer(id) { it.put("bytes_transferred", reply.offset) }
+                            throw IllegalStateException("Google accepted a different byte count. Resume to reconcile safely.")
                         }
-                        digest.update(buffer, 0, read)
-                        current = api.chunk(id, offset, if (read == buffer.size) buffer else buffer.copyOf(read))
-                        require(current.getLong("bytes_transferred") == offset + read) { "Upload offset changed. Resume this transfer to continue safely." }
-                        offset += read
-                        val progress = "Uploading ${doc.name} · ${formatBytes(offset)} / ${formatBytes(doc.size)}"
-                        withContext(Dispatchers.Main) { transferProgress = progress }
+                        offset = reply.offset
+                        check(offset < size) { "Google has all bytes but has not confirmed the file. Resume later and check Drive." }
+                        changeTransfer(id) { it.put("bytes_transferred", offset) }
+                        transferProgress = "${if (kind == "copy") "Copying" else "Uploading"} ${t.optString("name")} · ${formatBytes(offset)} / ${formatBytes(size)}"
+                    }
+                    is UploadReply.Complete -> {
+                        check(start + count == size) { "Google reported completion before the final chunk. Check Drive." }
+                        finishTransfer(id, reply.file); return
                     }
                 }
-                val actual = digest.digest().joinToString("") { "%02x".format(it) }
-                val remote = current.text("result_md5")
-                if (remote != null && !remote.equals(actual, ignoreCase = true)) throw IllegalStateException("Checksum mismatch: review the destination file in Google Drive.")
-                current to (remote != null)
             }
-            transferProgress = null; store.forgetUri(id)
-            notice = if (result.second) "Upload complete. MD5 checksum verified." else "Upload complete. Google did not provide an MD5 checksum."
-            refreshAll()
-            } finally { transferProgress = null; activeUploadId = null }
-        }
+        } finally { withContext(NonCancellable + Dispatchers.IO) { stream?.close() } }
     }
 
-    fun refreshTransfers() = launch(showBusy = false) {
-        transfers = withContext(Dispatchers.IO) { JSONObject(api().request("/api/transfers")).getJSONArray("items").objects() }
-    }
-    fun cancelTransfer(id: String) = launch {
-        withContext(Dispatchers.IO) { api().request("/api/transfers/$id/cancel", "POST") }
-        if (activeDownloadId == id) downloadJob?.cancel()
-        if (activeUploadId == id) uploadJob?.cancel()
-        transferProgress = null; store.forgetUri(id)
-        notice = "Transfer cancelled."; refreshTransfers()
-    }
-    fun retryTransfer(t: JSONObject) = launch {
-        val updated = withContext(Dispatchers.IO) { JSONObject(api().request("/api/transfers/${t.getString("id")}/retry", "POST")) }
-        if (updated.optString("kind") == "upload") resumeUpload(updated) else { notice = "Copy resumed on the backend."; refreshTransfers() }
+    private fun finishTransfer(id: String, result: JSONObject) {
+        val t = transfer(id); val size = t.getLong("size"); val expected = t.text("expected_md5")
+        val actual = result.text("md5Checksum"); val actualSize = result.longOrNull("size")
+        val mismatch = (actualSize != null && actualSize != size) || (expected != null && actual != null && !expected.equals(actual, true))
+        changeTransfer(id) {
+            it.put("bytes_transferred", size).put("result_file_id", result.optString("id"))
+            it.put("checksum_verified", !mismatch && expected != null && actual != null)
+            it.put("status", if (mismatch) "review_required" else "completed")
+            it.put("resume_blocked", true).remove("session_url")
+            if (mismatch) it.put("error", "Destination size or checksum differs. The file may exist in Drive; review it manually.") else it.remove("error")
+        }
+        notice = when {
+            mismatch -> "Transfer finished with a mismatch. Review the destination file in Drive."
+            expected != null && actual != null -> "Transfer complete. MD5 checksum verified."
+            else -> "Transfer complete. Google did not return a checksum; verify the destination."
+        }
+        loadFiles()
     }
 
     fun download(file: JSONObject, uri: Uri) {
-        if (downloadJob?.isActive == true) { error = "A download is already running on this device."; return }
-        downloadJob = launch {
+        if (transferJob?.isCompleted == false) { error = "A transfer is already running on this device."; return }
+        if (isWorkspaceNative(file.optString("mime_type"))) { error = "Folders and Google Workspace documents cannot be downloaded as binary files."; return }
+        val t = JSONObject().put("id", UUID.randomUUID().toString()).put("kind", "download").put("name", file.optString("name"))
+            .put("size", file.longOrNull("size") ?: JSONObject.NULL).put("source_account_id", file.getString("account_id"))
+            .put("bytes_transferred", 0).put("status", "pending")
+        transfers = listOf(t) + transfers
+        try { persist(); updateDashboard() } catch (e: Exception) { error = displayError(e); return }
+        val id = t.getString("id"); activeTransferId = id
+        transferJob = viewModelScope.launch {
             try {
-            val verified = withContext(Dispatchers.IO) {
-                val api = api(); val digest = MessageDigest.getInstance("MD5")
-                api.download(file.getString("account_id"), file.getString("id")).use { response ->
-                    activeDownloadId = response.header("X-Transfer-Id")
-                    val input = response.body?.byteStream() ?: throw IllegalStateException("Empty download response")
-                    val output = getApplication<Application>().contentResolver.openOutputStream(uri, "wt") ?: throw IllegalStateException("Could not open the destination")
-                    output.use { target ->
-                        val buffer = ByteArray(64 * 1024); var total = 0L
+                changeTransfer(id) { it.put("status", "in_progress") }
+                val response = withDrive(file.getString("account_id")) { drive.download(it, file.getString("id")) }
+                val digest = MessageDigest.getInstance("MD5"); var total = 0L; var lastSaved = 0L
+                response.use { r ->
+                    val input = r.body?.byteStream() ?: throw IllegalStateException("Empty Drive response.")
+                    val output = withContext(Dispatchers.IO) { getApplication<Application>().contentResolver.openOutputStream(uri, "wt") }
+                        ?: throw IllegalStateException("Could not open the selected destination.")
+                    try {
+                        val buffer = ByteArray(64 * 1024)
                         while (true) {
-                            ensureActive()
-                            val n = input.read(buffer)
+                            coroutineContext.ensureActive()
+                            val n = withContext(Dispatchers.IO) { input.read(buffer) }
                             if (n < 0) break
-                            target.write(buffer, 0, n); digest.update(buffer, 0, n); total += n
-                            val progress = "Downloading ${file.optString("name")} · ${formatBytes(total)}"
-                            withContext(Dispatchers.Main) { transferProgress = progress }
+                            if (n == 0) continue
+                            withContext(Dispatchers.IO) { output.write(buffer, 0, n) }
+                            digest.update(buffer, 0, n); total += n
+                            transferProgress = "Downloading ${file.optString("name")} · ${formatBytes(total)}"
+                            if (total - lastSaved >= CHUNK_SIZE) { changeTransfer(id) { it.put("bytes_transferred", total) }; lastSaved = total }
                         }
-                    }
+                        withContext(Dispatchers.IO) { output.flush() }
+                    } finally { withContext(NonCancellable + Dispatchers.IO) { output.close() } }
                 }
-                val local = digest.digest().joinToString("") { "%02x".format(it) }
+                val expectedSize = file.longOrNull("size")
+                check(expectedSize == null || total == expectedSize) { "Download size mismatch. Delete the incomplete local file and try again." }
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }
                 val expected = file.text("md5_checksum")
-                if (expected != null && !expected.equals(local, ignoreCase = true)) throw IllegalStateException("Download checksum mismatch. Delete the incomplete file and try again.")
-                expected != null
-            }
-            activeDownloadId = null; transferProgress = null
-            notice = if (verified) "Download complete. MD5 checksum verified." else "Download complete. No checksum was available."
-            refreshTransfers()
-            } finally { activeDownloadId = null; transferProgress = null }
+                check(expected == null || expected.equals(actual, true)) { "Download checksum mismatch. Delete the local file and try again." }
+                changeTransfer(id) { it.put("status", "completed").put("bytes_transferred", total).put("checksum_verified", expected != null) }
+                notice = if (expected != null) "Download complete. MD5 checksum verified." else "Download complete. Google did not provide a checksum."
+            } catch (_: CancellationException) { }
+            catch (e: Exception) {
+                try { changeTransfer(id) { it.put("status", "failed").put("error", "${displayError(e)} A partial local file may remain.") } } catch (_: Exception) { }
+                error = "${displayError(e)} A partial local file may remain."
+            } finally { activeTransferId = null; transferProgress = null }
         }
     }
 }

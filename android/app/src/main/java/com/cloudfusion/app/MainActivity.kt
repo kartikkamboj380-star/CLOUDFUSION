@@ -1,11 +1,13 @@
 package com.cloudfusion.app
 
-import android.content.Intent
+import android.accounts.AccountManager
+import android.app.Activity
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,10 +18,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -31,19 +31,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.delay
+import com.google.android.gms.common.AccountPicker
 import org.json.JSONObject
 
 private val Ink = Color(0xFF090C15)
@@ -75,15 +69,28 @@ private val destinations = listOf(
 fun CloudFusionApp(vm: CloudViewModel = viewModel()) {
     var tab by remember { mutableIntStateOf(0) }
     val snackbar = remember { SnackbarHostState() }
-    val lifecycle = LocalLifecycleOwner.current
-    LaunchedEffect(vm.token) { if (vm.token.isNotBlank()) vm.refreshAll() }
-    DisposableEffect(lifecycle, vm.token) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME && vm.token.isNotBlank()) vm.refreshAccounts()
-        }
-        lifecycle.lifecycle.addObserver(observer)
-        onDispose { lifecycle.lifecycle.removeObserver(observer) }
+    val authorization = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) vm.finishAuthorization(result.data) else vm.authorizationCancelled()
     }
+    val chooser = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val email = if (result.resultCode == Activity.RESULT_OK) result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME) else null
+        if (!email.isNullOrBlank()) vm.connectAccount(email)
+        else if (result.resultCode == Activity.RESULT_OK) vm.showError("Google did not return an account. Try again.")
+    }
+    val chooseAccount: () -> Unit = {
+        try {
+            val options = AccountPicker.AccountChooserOptions.Builder()
+                .setAllowableAccountsTypes(listOf("com.google")).setAlwaysShowAccountPicker(true).build()
+            chooser.launch(AccountPicker.newChooseAccountIntent(options))
+        } catch (_: Exception) { vm.showError("Could not open the Google account picker. Check Google Play services.") }
+    }
+    LaunchedEffect(vm.authorizationResolution) {
+        vm.consumeAuthorizationResolution()?.let { pending ->
+            try { authorization.launch(IntentSenderRequest.Builder(pending.intentSender).build()) }
+            catch (_: Exception) { vm.authorizationCancelled(); vm.showError("Could not open Google's consent screen. Try again.") }
+        }
+    }
+    LaunchedEffect(Unit) { vm.refreshAll() }
     LaunchedEffect(vm.error, vm.notice) {
         val message = vm.error ?: vm.notice
         if (message != null) { snackbar.showSnackbar(message); vm.clearMessages() }
@@ -92,7 +99,7 @@ fun CloudFusionApp(vm: CloudViewModel = viewModel()) {
         containerColor = Ink,
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
-            if (vm.token.isNotBlank()) NavigationBar(containerColor = Color(0xFF111521), tonalElevation = 0.dp) {
+            NavigationBar(containerColor = Color(0xFF111521), tonalElevation = 0.dp) {
                 destinations.forEachIndexed { index, destination ->
                     NavigationBarItem(selected = tab == index, onClick = { tab = index },
                         icon = { Icon(destination.icon, contentDescription = destination.label) },
@@ -103,53 +110,15 @@ fun CloudFusionApp(vm: CloudViewModel = viewModel()) {
         }
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
-            if (vm.token.isBlank()) AuthScreen(vm)
-            else when (tab) {
+            when (tab) {
                 0 -> HomeScreen(vm, onAccounts = { tab = 3 }, onFiles = { tab = 1 }, onTransfers = { tab = 2 })
                 1 -> FilesScreen(vm)
                 2 -> TransfersScreen(vm)
-                3 -> AccountsScreen(vm)
-                4 -> SettingsScreen(vm)
+                3 -> AccountsScreen(vm, chooseAccount)
+                4 -> SettingsScreen()
             }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter), color = Mint)
         }
-    }
-}
-
-@Composable
-private fun AuthScreen(vm: CloudViewModel) {
-    var server by remember { mutableStateOf(vm.server) }
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var register by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 36.dp),
-        verticalArrangement = Arrangement.Center) {
-        BrandMark()
-        Spacer(Modifier.height(28.dp))
-        Text("Your cloud,\nin one place.", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold, lineHeight = 43.sp)
-        Spacer(Modifier.height(12.dp))
-        Text("A thoughtful home for your Google Drive accounts. Your files stay in the accounts you choose.", color = Muted, lineHeight = 23.sp)
-        Spacer(Modifier.height(28.dp))
-        Text(if (register) "Create your CloudFusion account" else "Welcome back", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(16.dp))
-        OutlinedTextField(server, { server = it }, label = { Text("Backend HTTPS URL") }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(10.dp))
-        OutlinedTextField(email, { email = it }, label = { Text("Email") }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email), modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(10.dp))
-        OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true,
-            visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth())
-        if (register) Text("Use at least 12 characters.", color = Muted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
-        Spacer(Modifier.height(20.dp))
-        Button(onClick = { vm.authenticate(server, email, password, register) }, enabled = !vm.busy && server.isNotBlank() && email.isNotBlank() && password.isNotBlank(),
-            modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(16.dp)) {
-            Text(if (register) "Create account" else "Sign in", fontWeight = FontWeight.Bold)
-        }
-        TextButton(onClick = { register = !register }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-            Text(if (register) "Already have an account? Sign in" else "New to CloudFusion? Create account")
-        }
-        Text("A self-hosted CloudFusion backend and Google OAuth setup are required.", color = Muted, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -237,7 +206,7 @@ private fun HomeScreen(vm: CloudViewModel, onAccounts: () -> Unit, onFiles: () -
             }
         }
         val recent = dash?.optJSONArray("recent_files")?.objects() ?: emptyList()
-        if (recent.isEmpty()) item { Panel(Modifier.fillMaxWidth()) { Text("No indexed files yet", fontWeight = FontWeight.Medium); Text("Refresh files to load them from Google Drive.", color = Muted, fontSize = 13.sp) } }
+        if (recent.isEmpty()) item { Panel(Modifier.fillMaxWidth()) { Text("No files loaded yet", fontWeight = FontWeight.Medium); Text("Refresh files to load them from Google Drive.", color = Muted, fontSize = 13.sp) } }
         else items(recent, key = { it.optString("account_id") + it.optString("id") }) { FileSummary(it) }
         item {
             val history = dash?.optJSONArray("recent_transfers")?.objects() ?: emptyList()
@@ -312,60 +281,57 @@ private fun EmptyPanel(title: String, description: String, action: String? = nul
 }
 
 @Composable
-private fun AccountsScreen(vm: CloudViewModel) {
-    val context = LocalContext.current
+private fun AccountsScreen(vm: CloudViewModel, chooseAccount: () -> Unit) {
     var disconnect by remember { mutableStateOf<JSONObject?>(null) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { ScreenHeader("Accounts", "Every Drive stays independent.") { IconButton(onClick = { vm.refreshAccounts(true) }) { Icon(Icons.Default.Refresh, "Refresh accounts") } } }
         item {
-            Button(onClick = { vm.connectAccount { uri -> context.startActivity(Intent(Intent.ACTION_VIEW, uri)) } },
+            Button(onClick = chooseAccount, enabled = !vm.authInProgress,
                 modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)) {
                 Icon(Icons.Default.Add, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("Connect Google account", fontWeight = FontWeight.Bold)
             }
         }
-        item { Text("Google may ask you to select an account and approve Drive access in your browser.", color = Muted, fontSize = 13.sp) }
+        item { Text("Choose a Google account on this device. Google will ask for permission to manage its Drive files. No separate CloudFusion login or server is needed.", color = Muted, fontSize = 13.sp) }
         if (vm.accounts.isEmpty()) item { EmptyPanel("No accounts connected", "Add an account to see its quota and files.") }
         items(vm.accounts, key = { it.optString("id") }) { account ->
             Column {
                 AccountSummary(account)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    if (account.optBoolean("reauthorization_required")) TextButton(onClick = { vm.connectAccount { uri -> context.startActivity(Intent(Intent.ACTION_VIEW, uri)) } }) { Text("Reconnect") }
+                    TextButton(onClick = { vm.connectAccount(account.getString("id")) }, enabled = !vm.authInProgress) { Text("Reconnect") }
                     TextButton(onClick = { disconnect = account }) { Text("Disconnect") }
                 }
             }
         }
-        item { Text("Disconnecting removes CloudFusion's saved credentials. It does not delete your Google Drive files.", color = Muted, fontSize = 12.sp) }
+        item { Text("Disconnecting removes the local account and stops its resumable transfers; it does not delete files or revoke the Google grant. Revoke it in Google Account permissions if desired.", color = Muted, fontSize = 12.sp) }
     }
     disconnect?.let { account ->
         AlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect account?") },
-            text = { Text("${account.optString("email")} will be removed from this view. Your files remain in Google Drive.") },
+            text = { Text("${account.optString("email")} will be removed from this device. Unfinished transfers using it cannot be resumed. Your files remain in Google Drive.") },
             confirmButton = { TextButton(onClick = { vm.disconnect(account.getString("id")); disconnect = null }) { Text("Disconnect") } },
             dismissButton = { TextButton(onClick = { disconnect = null }) { Text("Keep account") } })
     }
 }
 
 @Composable
-private fun SettingsScreen(vm: CloudViewModel) {
-    var url by remember(vm.server) { mutableStateOf(vm.server) }
+private fun SettingsScreen() {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ScreenHeader("Settings", "Your CloudFusion workspace")
         Panel(Modifier.fillMaxWidth()) {
-            Text("Signed in as", color = Muted, fontSize = 12.sp)
-            Text(vm.email, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
-            TextButton(onClick = { vm.logout() }) { Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("Sign out") }
-        }
-        Panel(Modifier.fillMaxWidth()) {
-            Text("Backend server", fontWeight = FontWeight.Bold)
-            Text("Use a trusted HTTPS server. Changing it signs you out.", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
-            OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            TextButton(onClick = { vm.saveServer(url) }) { Text("Save server") }
+            Text("Direct to Google Drive", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text("This Android app talks directly to Google. There is no backend URL or separate CloudFusion account.", color = Muted, lineHeight = 21.sp)
         }
         Panel(Modifier.fillMaxWidth()) {
             Text("About your storage", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            Text("CloudFusion provides a virtual view; it does not merge Google accounts. Files remain normal files in their destination Drive.", color = Muted, lineHeight = 21.sp)
+            Text("CloudFusion shows a virtual view; it does not merge Google accounts or pool their storage. Organization quotas may be shared, so summing them can count the same pool more than once.", color = Muted, lineHeight = 21.sp)
+        }
+        Panel(Modifier.fillMaxWidth()) {
+            Text("Transfers & privacy", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text("Copies travel through this phone and use download and upload data, battery and time. Keep the app open and online. Incomplete downloads may leave a partial file.", color = Muted, lineHeight = 21.sp)
             Spacer(Modifier.height(10.dp))
-            Text("Account-to-account copies stream through your backend, not your phone. Uploads and downloads run while this app is open.", color = Muted, lineHeight = 21.sp)
+            Text("Local account and transfer state is encrypted. Google handles authorization; this app never asks for your Google password.", color = Muted, lineHeight = 21.sp)
         }
     }
 }
@@ -424,7 +390,7 @@ private fun FilesScreen(vm: CloudViewModel) {
         }
         item {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("${vm.files.size} shown", color = Muted, fontSize = 12.sp)
+                Text("${vm.files.size} loaded", color = Muted, fontSize = 12.sp)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box {
                         TextButton(onClick = { sortMenu = true }) { Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = null); Spacer(Modifier.width(4.dp)); Text("Sort: ${vm.sort}") }
@@ -443,15 +409,19 @@ private fun FilesScreen(vm: CloudViewModel) {
             ManagedFileCard(file,
                 onRename = { renameFile = file }, onMove = { moveFile = file }, onTrash = { trashFile = file },
                 onCopy = { copyFile = file }, onShare = { vm.getSharing(file) { shareFile = file; shareData = it } },
-                onDownload = { downloadFile = file; downloadPicker.launch(file.optString("name", "download")) })
+                onDownload = {
+                    if (isWorkspaceNative(file.optString("mime_type"))) vm.showError("Folders and Google Workspace documents cannot be downloaded as binary files.")
+                    else { downloadFile = file; downloadPicker.launch(file.optString("name", "download")) }
+                })
         }
-        if (vm.nextOffset != null) item { OutlinedButton(onClick = { vm.loadFiles(more = true) }, modifier = Modifier.fillMaxWidth()) { Text("Load more") } }
+        if (vm.nextOffset != null) item { OutlinedButton(onClick = { vm.loadFiles(more = true) }, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) { Text("Load more") } }
+        item { Text("Search runs on Google Drive. Sort applies to loaded pages; load more to include further results.", color = Muted, fontSize = 11.sp) }
         vm.transferProgress?.let { progress -> item { Panel(Modifier.fillMaxWidth()) { Text(progress, fontSize = 13.sp); Text("Manage or cancel in Transfers", color = Muted, fontSize = 12.sp) } } }
     }
     vm.pendingUpload?.let { pending ->
         val email = vm.accounts.firstOrNull { it.optString("id") == pending.transfer.optString("destination_account_id") }?.optString("email") ?: "Selected account"
         AlertDialog(onDismissRequest = { vm.cancelPendingUpload() }, title = { Text("Ready to upload?") },
-            text = { Text("${pending.document.name}\n${formatBytes(pending.document.size)}\n\nDestination: $email\n\nThe file will remain a normal file in that Google Drive account.") },
+            text = { Text("${pending.document.name}\n${formatBytes(pending.document.size)}\n\nDestination: $email\n\nThe phone reads the file to verify it, then uploads directly to Google Drive. Keep the app open and online; internet data and battery are used. The file is not split.") },
             confirmButton = { TextButton(onClick = { vm.confirmUpload() }) { Text("Upload") } },
             dismissButton = { TextButton(onClick = { vm.cancelPendingUpload() }) { Text("Cancel") } })
     }
@@ -468,7 +438,7 @@ private fun FilesScreen(vm: CloudViewModel) {
         AlertDialog(onDismissRequest = { copyFile = null }, title = { Text("Copy to another account") },
             text = {
                 Column {
-                    Text("The backend streams the file between accounts. Choose a destination:", color = Muted)
+                    Text("The file is downloaded and uploaded through this phone, using internet data and battery. Keep the app open and online. Choose a destination to start:", color = Muted)
                     Spacer(Modifier.height(8.dp))
                     if (choices.isEmpty()) Text("Connect another account first.")
                     choices.forEach { account ->
@@ -578,11 +548,8 @@ private fun TransfersScreen(vm: CloudViewModel) {
         if (uri != null) resume?.let { vm.resumeUpload(it, uri) }
         resume = null
     }
-    LaunchedEffect(vm.token) {
-        while (true) { vm.refreshTransfers(); delay(8000) }
-    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { ScreenHeader("Transfers", "Uploads, downloads & account copies") { IconButton(onClick = { vm.refreshTransfers() }) { Icon(Icons.Default.Refresh, "Refresh transfers") } } }
+        item { ScreenHeader("Transfers", "On-device uploads, downloads & copies") }
         vm.transferProgress?.let { progress -> item { Panel(Modifier.fillMaxWidth()) { Text(progress, color = Mint, fontSize = 13.sp) } } }
         if (vm.transfers.isEmpty()) item { EmptyPanel("No transfers yet", "Your transfer activity will appear here.") }
         items(vm.transfers, key = { it.optString("id") }) { t ->
@@ -595,20 +562,20 @@ private fun TransfersScreen(vm: CloudViewModel) {
                         Text("${t.optString("kind").replaceFirstChar { it.uppercase() }} · ${t.optString("status").replace('_', ' ')}", color = Muted, fontSize = 12.sp)
                     }
                 }
-                val size = t.optLong("size"); val transferred = t.optLong("bytes_transferred")
+                val size = t.longOrNull("size"); val transferred = t.optLong("bytes_transferred")
                 Spacer(Modifier.height(12.dp))
-                LinearProgressIndicator(progress = { if (size > 0) (transferred.toFloat() / size).coerceIn(0f, 1f) else 0f }, modifier = Modifier.fillMaxWidth().height(5.dp).clip(CircleShape), color = Mint, trackColor = Color(0xFF353B4F))
+                LinearProgressIndicator(progress = { if (size != null && size > 0) (transferred.toFloat() / size).coerceIn(0f, 1f) else 0f }, modifier = Modifier.fillMaxWidth().height(5.dp).clip(CircleShape), color = Mint, trackColor = Color(0xFF353B4F))
                 Text("${formatBytes(transferred)} / ${formatBytes(size)}", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
                 t.text("error")?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
                 if (t.optBoolean("checksum_verified")) Text("Checksum verified", color = Mint, fontSize = 12.sp)
                 val status = t.optString("status"); val kind = t.optString("kind")
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (status in listOf("initializing", "pending", "in_progress", "cancel_requested")) TextButton(onClick = { vm.cancelTransfer(t.getString("id")) }, enabled = status != "cancel_requested") { Text("Cancel") }
-                    if (kind == "upload" && status in listOf("pending", "in_progress", "failed")) TextButton(onClick = { resume = t; picker.launch(arrayOf("*/*")) }) { Text("Resume with file") }
-                    if (kind == "copy" && status == "failed") TextButton(onClick = { vm.retryTransfer(t) }) { Text("Retry copy") }
+                    if (status in listOf("pending", "hashing", "in_progress", "failed", "interrupted")) TextButton(onClick = { vm.cancelTransfer(t.getString("id")) }) { Text("Cancel") }
+                    if (kind == "upload" && status in listOf("failed", "interrupted") && !t.optBoolean("resume_blocked")) TextButton(onClick = { resume = t; picker.launch(arrayOf("*/*")) }) { Text("Resume with file") }
+                    if (kind == "copy" && status in listOf("failed", "interrupted") && !t.optBoolean("resume_blocked")) TextButton(onClick = { vm.retryTransfer(t) }) { Text("Resume copy") }
                 }
             }
         }
-        item { Text("Transfers on this device run while the app is open. Account copies run on the backend and may need retrying after a server restart.", color = Muted, fontSize = 12.sp) }
+        item { Text("Transfers run only while this app stays open and online. Copies use both download and upload data on this phone. Sessions can expire; if an outcome is unclear, check the destination Drive before starting again. A partial local download may remain after cancellation.", color = Muted, fontSize = 12.sp) }
     }
 }
