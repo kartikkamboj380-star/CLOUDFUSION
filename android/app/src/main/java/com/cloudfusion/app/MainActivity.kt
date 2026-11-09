@@ -2,8 +2,11 @@ package com.cloudfusion.app
 
 import android.accounts.AccountManager
 import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -31,6 +34,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -39,6 +43,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.common.AccountPicker
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.util.Locale
 
 private val Ink = Color(0xFF090C15)
 private val Surface = Color(0xFF151A28)
@@ -291,7 +297,7 @@ private fun AccountsScreen(vm: CloudViewModel, chooseAccount: () -> Unit) {
                 Icon(Icons.Default.Add, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("Connect Google account", fontWeight = FontWeight.Bold)
             }
         }
-        item { Text("Choose a Google account on this device. Google will ask for permission to manage its Drive files. No separate CloudFusion login or server is needed.", color = Muted, fontSize = 13.sp) }
+        item { Text("Choose a Google account on this device. Google will ask for permission to manage its Drive files. No separate CloudFusion login or server is needed. Google Cloud OAuth setup is required; see Settings.", color = Muted, fontSize = 13.sp) }
         if (vm.accounts.isEmpty()) item { EmptyPanel("No accounts connected", "Add an account to see its quota and files.") }
         items(vm.accounts, key = { it.optString("id") }) { account ->
             Column {
@@ -312,14 +318,37 @@ private fun AccountsScreen(vm: CloudViewModel, chooseAccount: () -> Unit) {
     }
 }
 
+@Suppress("DEPRECATION")
+private fun installedCertificateSha1(context: Context): String? = try {
+    val info = if (Build.VERSION.SDK_INT >= 28) context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        else context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNATURES)
+    val signature = if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners?.firstOrNull()
+        else info.signatures?.firstOrNull()
+    signature?.toByteArray()?.let { certificate ->
+        MessageDigest.getInstance("SHA-1").digest(certificate).joinToString(":") { "%02X".format(Locale.US, it) }
+    }
+} catch (_: Exception) { null }
+
 @Composable
 private fun SettingsScreen() {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val fingerprint = remember(context) { installedCertificateSha1(context) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         ScreenHeader("Settings", "Your CloudFusion workspace")
         Panel(Modifier.fillMaxWidth()) {
             Text("Direct to Google Drive", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text("This Android app talks directly to Google. There is no backend URL or separate CloudFusion account.", color = Muted, lineHeight = 21.sp)
+        }
+        Panel(Modifier.fillMaxWidth()) {
+            Text("Google developer setup", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text("The Google Cloud project owner must enable Drive API, add test users and register this package and APK certificate as an Android OAuth client.", color = Muted, lineHeight = 21.sp)
+            Spacer(Modifier.height(10.dp))
+            Text("Package: ${context.packageName}", color = Muted, fontSize = 12.sp)
+            Text("SHA-1: ${fingerprint ?: "Unavailable"}", color = Muted, fontSize = 12.sp)
+            if (fingerprint != null) TextButton(onClick = { clipboard.setText(AnnotatedString(fingerprint)) }) { Text("Copy SHA-1") }
         }
         Panel(Modifier.fillMaxWidth()) {
             Text("About your storage", fontWeight = FontWeight.Bold)

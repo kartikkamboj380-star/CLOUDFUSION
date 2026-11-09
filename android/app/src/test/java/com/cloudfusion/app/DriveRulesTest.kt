@@ -23,6 +23,7 @@ class DriveRulesTest {
         assertEquals(AggregateQuota(null, null, null), aggregateQuota(listOf(unlimited, QuotaSnapshot("unknown", null, null, false))))
         assertEquals(AggregateQuota(null, null, null), aggregateQuota(emptyList()))
         assertEquals(AggregateQuota(30, 100, 70), aggregateQuota(listOf(QuotaSnapshot("a", 30, 100, false))))
+        assertEquals(AggregateQuota(170, 200, 80), aggregateQuota(listOf(QuotaSnapshot("a", 150, 100, false), QuotaSnapshot("b", 20, 100, false))))
     }
 
     @Test fun quotaMathNeverWraps() {

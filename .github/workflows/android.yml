@@ -40,7 +40,12 @@ jobs:
         run: |
           set -o pipefail
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee app/build/outputs/apk/debug/signing-certificate.txt
-          echo "The debug APK's public signing certificate fingerprints are included in the artifact." >> "$GITHUB_STEP_SUMMARY"
+          sha1=$(sed -n 's/^Signer #1 certificate SHA-1 digest: //p' app/build/outputs/apk/debug/signing-certificate.txt | head -n 1)
+          test -n "$sha1"
+          formatted=$(echo "$sha1" | sed 's/../&:/g; s/:$//' | tr '[:lower:]' '[:upper:]')
+          echo "### Debug APK certificate SHA-1" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$formatted\` (public certificate fingerprint; also included in the artifact)" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Debug APK certificate SHA-1::$formatted"
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:

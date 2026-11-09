@@ -44,7 +44,8 @@ fun aggregateQuota(quotas: List<QuotaSnapshot>): AggregateQuota {
     val used = checkedSum(quotas.map { it.used!! })
     if (quotas.any { it.unlimited || it.limit == null || it.limit < 0 }) return AggregateQuota(used, null, null)
     val capacity = checkedSum(quotas.map { it.limit!! })
-    val remaining = if (used != null && capacity != null) (capacity - used).coerceAtLeast(0) else null
+    // Quotas are independent: an overfull account must not consume another account's available space.
+    val remaining = if (used != null && capacity != null) checkedSum(quotas.map { (it.limit!! - it.used!!).coerceAtLeast(0) }) else null
     return AggregateQuota(used, capacity, remaining)
 }
 
