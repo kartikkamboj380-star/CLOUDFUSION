@@ -1,33 +1,45 @@
 # Google Cloud and OAuth setup
 
-CloudFusion's backend is a confidential **Web application** OAuth client. Android and web clients never receive the Google refresh token or client secret. Each Google account remains separate. You may connect four or more accounts, subject to Google's consent-screen and account policies.
+CloudFusion has two **separate** paths. The current Android app connects directly to Drive with an **Android OAuth client**. The optional legacy backend/web app uses a confidential **Web application client**. Connecting an account in one path does not connect it in the other.
 
-## Configure the project
+## Android: direct Google Drive
 
-1. In [Google Cloud Console](https://console.cloud.google.com/), select or create a project you control.
-2. Under **APIs & Services → Library**, enable **Google Drive API**.
-3. Configure **Google Auth platform / OAuth consent screen** with the application name, support email, developer contact, audience and any requested authorized domains. Console labels can change.
-4. For an external application in **Testing**, add the email address of **each** Google account you want to connect under test users. Accounts outside that list will be denied. Workspace accounts may additionally require administrator approval.
-5. Create an OAuth client of type **Web application**. Add the exact redirect URI:
-   - Local desktop development: `http://localhost:8000/api/oauth/callback`.
-   - Deployed application: `https://your-domain.example/api/oauth/callback`.
-6. In the backend's environment set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_REDIRECT_URI` to the values from this client. The URI must match exactly, including scheme, host and path. Never put the secret in the repository or Android app.
-7. Restart the backend. Sign in to CloudFusion, choose **Connect Google account**, complete Google's consent flow in your browser and return to CloudFusion. Refresh accounts, then refresh files. Repeat for each account. Reconnecting an existing Google identity updates its saved credentials rather than adding a duplicate for that CloudFusion user.
+### Before connecting accounts
 
-The browser that handles consent must be able to reach the callback. `10.0.2.2` is the Android emulator's host alias, not a public callback. For a real phone, use a public HTTPS domain with a valid certificate, or perform the local callback from a desktop browser signed in to the same CloudFusion account.
+1. On a device running Android 8.0+ with up-to-date Google Play services, add the desired Google accounts under Android Settings. The app uses Google's account picker and asks consent for each account.
+2. Create/select a Google Cloud project you control and enable **Google Drive API** under APIs & Services → Library.
+3. Configure Google Auth platform / OAuth consent screen: app name, support/contact information and audience. If the audience is External and the app is in **Testing**, add **every account you intend to connect** as a test user. Workspace administrators may need to allow the app and its scope.
+4. Under Google Auth platform → Clients, create an OAuth client of type **Android**. Set package name **`com.cloudfusion.app`** and the **SHA-1 signing certificate fingerprint for the exact installed APK**. Register separate Android clients/fingerprints for different signing keys (including the Play App Signing certificate if applicable). Do not use the source repository's commit hash or an old build's fingerprint.
+5. Install that APK and choose **Accounts → Connect Google account**. Pick the account and approve the Google consent screen. Repeat for the other accounts. The app checks the account email returned by Drive against the selection and refuses a mismatch. Reconnect an account when Google requires renewed consent.
 
-## Requested scopes and verification
+The app requests `https://www.googleapis.com/auth/drive`. This restricted scope is needed to view/manage pre-existing Drive files across accounts; the narrower `drive.file` scope would only cover files the user opens or creates through the app. Public use can require Google's restricted-scope verification, privacy disclosures, and potentially an independent security assessment; Workspace and policy restrictions still apply. This repository does **not** claim Google verification. Google's general authorization guide also describes a Web client for server-side authorization; the direct Android app does not request a server authorization code or use a backend. No client secret or `google-services.json` is embedded in this Android implementation.
 
-- `openid`: identify the Google account.
-- `https://www.googleapis.com/auth/userinfo.email`: show and verify its email address.
-- `https://www.googleapis.com/auth/drive`: list, read, create, modify and share the user's Drive files.
+### Find the SHA-1 for a GitHub Actions APK
 
-The full Drive scope is **restricted**. The narrower `drive.file` scope does not grant access to all pre-existing files, so it cannot satisfy the requested unified file manager. Google determines whether OAuth verification and an independent security assessment are required for production use of restricted scopes, particularly when a server stores or transmits the data. CloudFusion does not claim to be Google-verified. Follow current Google policies before making an app public and provide the privacy policy and disclosures Google requires.
+A successful Android run uploads `CloudFusion-debug-apk`, containing `app-debug.apk` and `signing-certificate.txt`. The certificate file is produced **from that APK** using `apksigner verify --print-certs`; find `Signer #1 certificate SHA-1 digest`. The Actions run summary and the installed app's **Settings → Google developer setup** also show the SHA-1 (with a copy button). This fingerprint is public certificate information, not a private key. If Google Cloud's entry expects colon-separated uppercase hex, insert a colon between every two characters. For a local build:
 
-In Testing, Google's offline refresh tokens for external applications with Drive scopes generally expire after seven days. Refresh tokens may also be revoked, invalidated, or affected by Google security policy. CloudFusion marks an account for reauthorization when Google reports a revoked/invalid grant; reconnect through the account screen. Google may refuse to issue a new refresh token in some circumstances. If so, revoke the existing app grant in [Google Account permissions](https://myaccount.google.com/permissions), then connect again and approve offline access.
+```bash
+cd android
+./gradlew testDebugUnitTest assembleDebug
+"$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk
+```
 
-## Security notes
+GitHub-hosted jobs generally generate a fresh debug key in each runner. **A later artifact can have a different SHA-1** and cannot update a differently signed installed app. Register each exact build's fingerprint or build/sign with a stable key you securely control. If Android refuses installation due to a different signing certificate, uninstalling the older debug app removes its local account and transfer state (not Drive files), then install the new one. Never commit a keystore or its passwords; a real release should use protected signing material and appropriate Play App Signing setup.
 
-The flow uses a random, ten-minute, single-use state and PKCE S256, requests offline access and verifies the Google userinfo email. The backend encrypts Google access/refresh tokens before storing them and keeps the key outside the database. Protect the OAuth client secret, database, encryption key and server. Lost keys make stored tokens unreadable; rotating the key requires a planned re-encryption migration, which is not included.
+### Troubleshooting
 
-Disconnecting an account deletes CloudFusion's stored credentials and indexed metadata; it does not remove the Google grant or delete Drive files. Revoke the grant on Google's account-permissions page if you also want to stop Google's authorization.
+- A Google authorization/developer error can mean the Drive API is disabled, the package or certificate SHA-1 does not match the APK, the wrong Google Cloud project owns the Android client, the account is not an OAuth test user, or Google/Workspace policy denied access. Check Play services and internet connectivity too.
+- An account must be present on the device and explicitly selected. This app never asks for a Google password and does not store a Google refresh token. It holds short-lived access tokens in memory; Google Play services handles its own cache. If consent is required again, tap **Reconnect** in Accounts.
+- Disconnecting removes the local account and invalidates local resumability for affected unfinished transfers. It does not remove Drive files or revoke Google's grant. To revoke the grant, use [Google Account permissions](https://myaccount.google.com/permissions).
+- Android direct accounts and transfer state do not migrate from the old backend-based app. On upgrade, the old local backend URL/session is removed; any server-side data and Google Drive files remain untouched. A fresh connection is required.
+
+## Optional legacy backend and web
+
+The optional backend is a confidential **Web application** OAuth client. It stores encrypted Google refresh tokens on the server. This flow is not used by the current Android app.
+
+1. Enable Google Drive API and configure the OAuth consent screen/test users as above.
+2. Create a **Web application** OAuth client. Register the exact redirect URI, such as `http://localhost:8000/api/oauth/callback` for a local desktop test or `https://your-domain.example/api/oauth/callback` for a deployed service.
+3. Set the backend's `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_REDIRECT_URI` privately and restart it. Never put the secret in the repository or Android app.
+4. Sign in to the optional web companion's CloudFusion account, choose **Connect Google account**, complete consent in a browser that can reach the exact callback, and refresh. Repeat for each account.
+
+This server flow requests `openid`, `userinfo.email` and the restricted full Drive scope. It uses random one-time state, PKCE and offline access; the server encrypts access/refresh tokens with the configured Fernet key. External apps in Testing with Drive scopes generally receive refresh tokens that expire after seven days. Revoked/expired credentials need reconnection; in some cases the existing grant must be revoked before Google issues a new refresh token. Protect the backend secret, database and encryption key. See [deployment](deployment.md).
