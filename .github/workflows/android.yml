@@ -45,10 +45,7 @@ jobs:
           set +e
           ./gradlew --no-daemon --console plain testDebugUnitTest lintDebug assembleDebug 2>&1 | tee gradle-build.log
           result=${PIPESTATUS[0]}
-          if [ "$result" -ne 0 ]; then
-            # Surface compiler diagnostics as check annotations as well as in the full log.
-            python -c 'from pathlib import Path; text="\n".join(Path("gradle-build.log").read_text(errors="replace").splitlines()[-100:]); print("::error title=Gradle output::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' 
-          fi
+          python ../.github/scripts/android_diagnostics.py
           exit "$result"
       - name: Record the APK signing certificate
         shell: bash
