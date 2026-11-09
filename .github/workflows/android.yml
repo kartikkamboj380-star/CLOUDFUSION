@@ -32,9 +32,7 @@ jobs:
           result=${PIPESTATUS[0]}
           if [ "$result" -ne 0 ]; then
             # Surface compiler diagnostics as check annotations as well as in the full log.
-            grep -E '^e: |^\* What went wrong:|^> |^FAILURE:' gradle-build.log | tail -40 | while IFS= read -r line; do
-              line=${line//%/%25}; echo "::error::$line"
-            done
+            python -c 'from pathlib import Path; text="\n".join(Path("gradle-build.log").read_text(errors="replace").splitlines()[-100:]); print("::error title=Gradle output::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' 
           fi
           exit "$result"
       - name: Upload debug APK
