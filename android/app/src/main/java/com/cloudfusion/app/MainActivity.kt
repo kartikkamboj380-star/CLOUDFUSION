@@ -207,7 +207,7 @@ private fun HomeScreen(vm: CloudViewModel, onAccounts: () -> Unit, onFiles: () -
         else items(vm.accounts.take(4), key = { it.optString("id") }) { AccountSummary(it) }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Recent files", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Loaded files", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 TextButton(onClick = onFiles) { Text("View all") }
             }
         }
@@ -304,7 +304,7 @@ private fun AccountsScreen(vm: CloudViewModel, chooseAccount: () -> Unit) {
                 AccountSummary(account)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = { vm.connectAccount(account.getString("id")) }, enabled = !vm.authInProgress) { Text("Reconnect") }
-                    TextButton(onClick = { disconnect = account }) { Text("Disconnect") }
+                    TextButton(onClick = { disconnect = account }, enabled = !vm.authInProgress) { Text("Disconnect") }
                 }
             }
         }

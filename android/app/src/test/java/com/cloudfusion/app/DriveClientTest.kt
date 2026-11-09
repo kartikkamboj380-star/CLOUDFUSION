@@ -60,6 +60,14 @@ class DriveClientTest {
         assertEquals("hello", chunk.body.readUtf8())
     }
 
+    @Test fun rejectsMisalignedNonFinalChunksBeforeNetwork() {
+        val session = server.url("/session").toString()
+        assertThrows(IllegalArgumentException::class.java) {
+            api.sendChunk("t", session, 0, 10, "text/plain", "abc".toByteArray())
+        }
+        assertEquals(0, server.requestCount)
+    }
+
     @Test fun serverAcknowledgementAndExpiredSessionAreNotGuessed() {
         val location = server.url("/session").toString()
         server.enqueue(MockResponse().setResponseCode(308).addHeader("Range", "bytes=0-9"))

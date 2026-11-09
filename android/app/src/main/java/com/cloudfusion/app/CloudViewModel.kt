@@ -233,6 +233,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
             if (e.code == 401 && retry) { clearCachedToken(token); return getTokenUnlocked(email, false) }
             throw e
         }
+        if (accounts.none { it.optString("id") == email }) throw IllegalStateException("This Google account was disconnected.")
         tokens[email] = token
         return token
     }
@@ -240,6 +241,10 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun <T> withDrive(email: String, operation: (String) -> T): T {
         check(accounts.any { it.optString("id") == email }) { "Reconnect the required Google account first." }
         val token = getToken(email)
+        if (accounts.none { it.optString("id") == email }) {
+            tokens.remove(email)
+            throw IllegalStateException("This Google account was disconnected.")
+        }
         try { return withContext(Dispatchers.IO) { operation(token) } }
         catch (e: DriveException) {
             if (e.code != 401) throw e
@@ -250,12 +255,16 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect(id: String) {
+        if (authInProgress && authEmail?.equals(id, true) == true) {
+            error = "Finish or cancel Google authorization before disconnecting this account."; return
+        }
         val active = transfers.firstOrNull { it.optString("id") == activeTransferId }
         if (active != null && (active.optString("source_account_id") == id || active.optString("destination_account_id") == id)) {
             error = "Cancel the active transfer before disconnecting this account."; return
         }
         launch {
-            tokens.remove(id)?.let { clearCachedToken(it) }
+            // Remove the account before suspending to clear Google's cache, so new operations cannot start.
+            val oldToken = tokens.remove(id)
             accounts = accounts.filterNot { it.optString("id") == id }
             transfers = transfers.map { t ->
                 if (t.optString("source_account_id") == id || t.optString("destination_account_id") == id) {
@@ -268,6 +277,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
             if (uploadAccountId == id) uploadAccountId = null
             files = files.filterNot { it.optString("account_id") == id }
             persist(); updateDashboard()
+            oldToken?.let { clearCachedToken(it) }
             notice = "Account removed from this device. Your Drive files and Google's authorization remain unchanged."
             loadFiles()
         }
@@ -473,6 +483,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
             } catch (_: CancellationException) {
                 // cancelTransfer records the state. Process death is detected at next launch.
             } catch (e: Exception) {
+                if (transfer(id).optString("status") == "cancelled") return@launch
                 val blocked = e is DriveException && e.code in listOf(404, 410)
                 try {
                     changeTransfer(id) {
@@ -659,6 +670,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
                 notice = if (expected != null) "Download complete. MD5 checksum verified." else "Download complete. Google did not provide a checksum."
             } catch (_: CancellationException) { }
             catch (e: Exception) {
+                if (transfer(id).optString("status") == "cancelled") return@launch
                 try { changeTransfer(id) { it.put("status", "failed").put("error", "${displayError(e)} A partial local file may remain.") } } catch (_: Exception) { }
                 error = "${displayError(e)} A partial local file may remain."
             } finally { activeTransferId = null; transferProgress = null }
