@@ -25,9 +25,9 @@ or physical Android test device is supplied by this repository/session.
 
 ## Implemented server-download flow
 
-Settings → **URL to cloud · Server downloads** → trusted HTTPS backend → CloudFusion
+Home → **Paste download link · Server to cloud** (also in Settings) → trusted HTTPS backend → CloudFusion
 server sign-in/register → Connect server Google account (system browser) → return and Refresh
-→ select destination → paste direct link/clipboard → Preview → Download to Cloud.
+→ select destination/default account → paste direct link/clipboard → Preview → Download to Cloud.
 
 This optional workspace **requires a real deployed backend**. It does not reintroduce a
 backend requirement for the existing direct-Drive screens. Its CloudFusion password is not
@@ -121,10 +121,9 @@ build, not a release or guaranteed upgrade. No production signing identity is fa
   low-memory profiling are unverified. OAuth Cloud configuration and test-user approval must
   be performed by the project owner; no password/token needs to be shared in chat.
 - Direct screens still call Drive, not backend file APIs. Server workspace does not yet
-  provide a second full cloud file manager/dashboard or server-account disconnect UI.
+  provide a second full cloud file manager/dashboard or unified server file-manager screen. Server-account disconnect and quota refresh controls are implemented separately.
 - No Android OS/background completion push notification (only visible-screen completion
-  message), durable distributed worker/lease system, unattended restart recovery, persistent
-  default-account setting, abuse/report queue, public directory, or Dropbox/OneDrive connector.
+  message), durable distributed worker/lease system, unattended restart recovery, abuse/report queue, public directory, or Dropbox/OneDrive connector.
 - Sharing in existing file manager remains explicit Google permissions, not global discovery.
 - Source HEAD/Content-Length/identity requirements exclude otherwise valid downloadable sites.
 - URL filename uses path, not Content-Disposition. No arbitrary headers/cookies/login scraping.

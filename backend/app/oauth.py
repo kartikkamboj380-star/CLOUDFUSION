@@ -43,6 +43,14 @@ def exchange_code(code: str, verifier: str) -> tuple[dict, dict]:
             "redirect_uri": settings.google_redirect_uri, "grant_type": "authorization_code", "code_verifier": verifier,
         }, timeout=30)
         if response.status_code != 200:
+            try:
+                reason = response.json().get("error")
+            except (ValueError, AttributeError):
+                reason = None
+            if reason in ("invalid_client", "unauthorized_client"):
+                raise HTTPException(503, "Server Google Web OAuth client is invalid. The maintainer must check client ID and secret; do not use an Android client here.")
+            if reason == "invalid_grant":
+                raise HTTPException(400, "Google authorization code expired or callback/PKCE did not match. Reconnect; the maintainer must verify the exact Web callback URI.")
             raise HTTPException(400, "Google did not accept the authorization; try connecting again")
         tokens = response.json()
         if not isinstance(tokens, dict) or not tokens.get("access_token"):

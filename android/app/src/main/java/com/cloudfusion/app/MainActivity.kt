@@ -119,11 +119,12 @@ fun CloudFusionApp(vm: CloudViewModel = viewModel()) {
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
-                0 -> HomeScreen(vm, onAccounts = { tab = 3 }, onFiles = { tab = 1 }, onTransfers = { tab = 2 })
+                0 -> HomeScreen(vm, onAccounts = { tab = 3 }, onFiles = { tab = 1 }, onTransfers = { tab = 2 }, onRemote = { tab = 5 })
                 1 -> FilesScreen(vm)
                 2 -> TransfersScreen(vm)
                 3 -> AccountsScreen(vm, chooseAccount)
                 4 -> SettingsScreen()
+                5 -> RemoteDownloadsScreen(onBack = { tab = 0 })
             }
             if (vm.busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter), color = Mint)
         }
@@ -158,7 +159,7 @@ private fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnScop
 }
 
 @Composable
-private fun HomeScreen(vm: CloudViewModel, onAccounts: () -> Unit, onFiles: () -> Unit, onTransfers: () -> Unit) {
+private fun HomeScreen(vm: CloudViewModel, onAccounts: () -> Unit, onFiles: () -> Unit, onTransfers: () -> Unit, onRemote: () -> Unit) {
     val dash = vm.dashboard
     val used = dash?.longOrNull("used_bytes")
     val capacity = dash?.longOrNull("capacity_bytes")
@@ -190,6 +191,13 @@ private fun HomeScreen(vm: CloudViewModel, onAccounts: () -> Unit, onFiles: () -
                     Text(if (utilization == null) "Usage unavailable" else "${"%.1f".format(utilization)}% used", color = Color(0xFFD8D8E5), fontSize = 12.sp)
                     Text("${formatBytes(dash?.longOrNull("remaining_bytes"))} free", color = Color(0xFFD8D8E5), fontSize = 12.sp)
                 }
+            }
+        }
+        item {
+            Button(onClick = onRemote, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Link, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Paste download link · Server to cloud")
             }
         }
         item {

@@ -265,3 +265,14 @@ def test_remote_history_real_pagination_and_user_scope(client, signup, add_accou
     other = signup("other@example.com")
     assert client.get("/api/remote-downloads", headers=other).json()["items"] == []
     assert client.get("/api/remote-downloads?limit=200", headers=headers).status_code == 422
+
+
+def test_encryption_key_alias_preserves_existing_variable_priority(monkeypatch):
+    from app.config import Settings
+    from cryptography.fernet import Fernet
+    original, alias = Fernet.generate_key().decode(), Fernet.generate_key().decode()
+    monkeypatch.setenv("FERNET_KEY", original)
+    monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", alias)
+    assert Settings(_env_file=None).fernet_key == original
+    monkeypatch.delenv("FERNET_KEY")
+    assert Settings(_env_file=None).fernet_key == alias

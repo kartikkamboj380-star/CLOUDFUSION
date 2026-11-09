@@ -66,6 +66,8 @@ def _error(response: httpx.Response) -> DriveFailure:
             reason = response.json().get("error", {}).get("errors", [{}])[0].get("reason", "")
         except (ValueError, AttributeError, IndexError, TypeError, httpx.ResponseNotRead):
             pass
+        if reason in ("accessNotConfigured", "serviceDisabled"):
+            return DriveFailure(403, "Google Drive API is disabled or unavailable in the OAuth client project; ask the project maintainer to enable it")
         if reason in ("storageQuotaExceeded", "teamDriveFileLimitExceeded"):
             return DriveFailure(409, "The destination account has insufficient storage quota")
         return DriveFailure(403 if response.status_code == 403 else 429,

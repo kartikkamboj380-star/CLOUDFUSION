@@ -78,3 +78,25 @@ def test_malformed_google_responses_are_sanitized(client, signup, add_account, m
     with pytest.raises(HTTPException) as exc:
         oauth.exchange_code("code", "verifier")
     assert exc.value.status_code == 502
+
+
+@pytest.mark.parametrize("reason,status,phrase", [("invalid_client", 503, "Web OAuth"), ("unauthorized_client", 503, "Android client"), ("invalid_grant", 400, "callback")])
+def test_web_oauth_client_errors_are_actionable_and_sanitized(monkeypatch, reason, status, phrase):
+    monkeypatch.setattr(oauth.httpx, "post", lambda *a, **k: httpx.Response(400, json={"error": reason, "error_description": "secret-should-not-leak"}))
+    with pytest.raises(HTTPException) as exc:
+        oauth.exchange_code("code", "verifier")
+    assert exc.value.status_code == status
+    assert phrase in exc.value.detail
+    assert "secret-should-not-leak" not in exc.value.detail
+
+
+def test_drive_api_disabled_error_is_actionable():
+    error = drive._error(httpx.Response(403, json={"error": {"errors": [{"reason": "accessNotConfigured"}]}}))
+    assert error.status == 403
+    assert "enable" in error.message
+
+
+def test_callback_access_denied_is_not_reported_as_success(client):
+    result = client.get("/api/oauth/callback?state=some-state&error=access_denied")
+    assert result.status_code == 403
+    assert "test-user" in result.json()["detail"]

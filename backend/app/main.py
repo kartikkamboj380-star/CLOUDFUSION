@@ -137,6 +137,8 @@ def oauth_start(user: User = Depends(current_user), db: Session = Depends(get_db
 @app.get("/api/oauth/callback", response_class=HTMLResponse)
 def oauth_callback(state: str = Query(min_length=1, max_length=512), code: str | None = Query(default=None, max_length=4096),
                    error: str | None = None, db: Session = Depends(get_db)):
+    if error == "access_denied":
+        raise HTTPException(403, "Google access was denied. If you did not decline consent, check OAuth audience/test-user approval and Workspace policy, then reconnect.")
     if error or not code:
         raise HTTPException(400, "Google authorization was not completed; return to CloudFusion and try again")
     oauth.finish_oauth(db, state, code)

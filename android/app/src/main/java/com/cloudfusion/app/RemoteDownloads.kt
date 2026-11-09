@@ -42,7 +42,7 @@ class RemoteDownloadsViewModel(app: Application) : AndroidViewModel(app) {
     var accounts by mutableStateOf<List<JSONObject>>(emptyList()); private set
     var tasks by mutableStateOf<List<JSONObject>>(emptyList()); private set
     var preview by mutableStateOf<JSONObject?>(null); private set
-    var selected by mutableStateOf("")
+    var selected by mutableStateOf(""); private set
     private var previewUrl = ""
     var nextOffset by mutableStateOf<Int?>(null); private set
     var pageOffset by mutableStateOf(0); private set
@@ -52,11 +52,12 @@ class RemoteDownloadsViewModel(app: Application) : AndroidViewModel(app) {
         try {
             val saved = store.read()
             origin = saved.optString("origin")
+            selected = saved.optString("default_account")
             token = saved.optString("token")
             signedIn = token.isNotBlank()
         } catch (_: Exception) { message = "Could not read server session. Sign in again." }
     }
-    private fun save() = store.write(JSONObject().put("origin", origin).put("token", token))
+    private fun save() = store.write(JSONObject().put("origin", origin).put("token", token).put("default_account", selected))
     private fun run(block: suspend () -> Unit) {
         if (busy) return
         viewModelScope.launch {
@@ -113,6 +114,9 @@ class RemoteDownloadsViewModel(app: Application) : AndroidViewModel(app) {
         tasks = updated
         nextOffset = if (page.isNull("next_offset")) null else page.getInt("next_offset")
     }
+    fun selectAccount(id: String) = run { selected = id; save() }
+    fun disconnect(id: String) = run { request("/api/accounts/$id", method = "DELETE"); load(); save() }
+    fun refreshQuotas() = run { request("/api/accounts/refresh", JSONObject()); load() }
     fun refresh() = run { load() }
     fun page(offset: Int) = run { pageOffset = offset; load() }
     fun remove(id: String) = run { request("/api/remote-downloads/$id", method = "DELETE"); load() }
@@ -159,6 +163,13 @@ fun RemoteDownloadsScreen(onBack: () -> Unit, vm: RemoteDownloadsViewModel = vie
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
+    var disconnect by remember { mutableStateOf<JSONObject?>(null) }
+    disconnect?.let { account ->
+        AlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect server account?") },
+            text = { Text("Remove ${account.optString("email")} from the server workspace? Drive files are not deleted and Google's grant is not revoked. Cancel its active/paused downloads first.") },
+            confirmButton = { TextButton(onClick = { vm.disconnect(account.getString("id")); disconnect = null }) { Text("Disconnect") } },
+            dismissButton = { TextButton(onClick = { disconnect = null }) { Text("Keep account") } })
+    }
     LaunchedEffect(vm.signedIn, lifecycle) {
         if (vm.signedIn) lifecycle.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             vm.refresh()
@@ -192,6 +203,7 @@ fun RemoteDownloadsScreen(onBack: () -> Unit, vm: RemoteDownloadsViewModel = vie
                 Text(vm.origin)
                 Row {
                     TextButton(onClick = { vm.refresh() }, enabled = !vm.busy) { Text("Refresh") }
+                    TextButton(onClick = { vm.refreshQuotas() }, enabled = !vm.busy) { Text("Quotas") }
                     TextButton(onClick = { vm.logout() }, enabled = !vm.busy) { Text("Sign out") }
                 }
                 Button(onClick = { vm.connect { link -> context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) } }, enabled = !vm.busy) { Text("Connect server Google account") }
@@ -199,9 +211,12 @@ fun RemoteDownloadsScreen(onBack: () -> Unit, vm: RemoteDownloadsViewModel = vie
                 Text("Destination account")
             }
             items(vm.accounts, key = { "account-" + it.getString("id") }) { account ->
-                TextButton(onClick = { vm.selected = account.getString("id") }, enabled = !vm.busy) {
-                    Text((if (vm.selected == account.getString("id")) "✓ " else "") + account.optString("email"))
+                TextButton(onClick = { vm.selectAccount(account.getString("id")) }, enabled = !vm.busy) {
+                    Text((if (vm.selected == account.getString("id")) "✓ Default: " else "") + account.optString("email"))
                 }
+                Text("Used: ${formatBytes(account.longOrNull("used_bytes"))} · Free: ${if (account.optBoolean("unlimited")) "Unlimited" else formatBytes(account.longOrNull("free_bytes"))}")
+                if (account.optBoolean("reauthorization_required")) Text("Reconnect using Connect server Google account above.", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { disconnect = account }, enabled = !vm.busy) { Text("Disconnect server account") }
             }
             item {
                 OutlinedTextField(url, { url = it }, label = { Text("Paste direct download link") }, modifier = Modifier.fillMaxWidth())

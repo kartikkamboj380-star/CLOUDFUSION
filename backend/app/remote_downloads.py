@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -50,6 +50,10 @@ def metadata(url):
         name = unquote(urlsplit(url).path.rsplit("/", 1)[-1]) or "download"
         name = name.replace("/", "_").replace("\\", "_")[:240]
         name = "".join(c for c in name if ord(c) >= 32 and ord(c) != 127).strip(". ") or "download"
+        try:
+            UploadRequest(name=name, size=size, mime_type=mime, idempotency_key="preview-validation")
+        except ValidationError as exc:
+            raise RemoteError("Source returned an unsupported file name or MIME type") from exc
         etag = response.getheader("ETag")
         if etag and (etag.startswith("W/") or len(etag) > 1024 or not etag.startswith('"') or not etag.endswith('"')):
             etag = None
