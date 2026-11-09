@@ -99,7 +99,7 @@ def _release(db: Session, transfer: Transfer) -> None:
 
 def _mark_failed(db: Session, transfer: Transfer, message: str) -> None:
     with _reservation_lock:
-        if transfer.status not in ("completed", "cancelled"):
+        if transfer.status not in ("completed", "cancelled") and not (transfer.status == "failed" and transfer.result_file_id):
             transfer.status = "failed"
             transfer.error = message[:500]
             _release(db, transfer)
@@ -231,7 +231,7 @@ def put_chunk(db: Session, user_id: str, transfer_id: str, offset: int, chunk: b
             # Reconcile before sending; this avoids replaying bytes after a lost response or restart.
             remote = client.upload_status(url, transfer.size)
             _apply_result(db, transfer, remote)
-            if transfer.status == "completed":
+            if transfer.status in ("completed", "failed"):
                 return transfer
             if remote["offset"] != offset:
                 raise HTTPException(409, detail={"message": "Upload offset changed; resume at the reported offset", "offset": remote["offset"]})
@@ -311,7 +311,7 @@ def copy_worker(user_id: str, transfer_id: str) -> None:
                 dest = owned_account(db, user_id, t.destination_account_id)
                 remote = drive.client_for(db, dest).upload_status(decrypt(t.session_url_enc), t.size)
                 _apply_result(db, t, remote)
-                if t.status == "completed":
+                if t.status in ("completed", "failed"):
                     return
                 offset = t.bytes_transferred
                 source_id = t.source_file_id
@@ -343,7 +343,7 @@ def copy_worker(user_id: str, transfer_id: str) -> None:
                     current = owned_transfer(progress_db, user_id, transfer_id)
                     if current.cancel_requested:
                         _finish_cancel(progress_db, current)
-                    elif current.status != "completed":
+                    elif current.status not in ("completed", "failed"):
                         _mark_failed(progress_db, current, "Source stream ended before the upload completed; retry to resume")
     except Exception as exc:
         message = exc.message if isinstance(exc, drive.DriveFailure) else "Transfer interrupted; retry to resume"

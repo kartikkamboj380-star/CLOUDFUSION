@@ -44,6 +44,7 @@ class FakeDrive:
         self.fail_quota = set()
         self.fail_upload_once = False
         self.lost_upload_response_once = False
+        self.corrupt_checksum = False
         self.fail_page = set()
 
     def client(self, db, account):
@@ -94,7 +95,7 @@ class FakeDrive:
                 session["data"].extend(chunk)
                 if len(session["data"]) == total:
                     file_id = "file_" + str(uuid.uuid4()).replace("-", "")
-                    digest = hashlib.md5(session["data"]).hexdigest()
+                    digest = "0" * 32 if fake.corrupt_checksum else hashlib.md5(session["data"]).hexdigest()
                     meta = {"id": file_id, "name": session["name"], "mimeType": session["mime"],
                             "size": str(total), "md5Checksum": digest}
                     fake.items.setdefault(aid, {})[file_id] = {"meta": meta, "data": bytes(session["data"])}

@@ -10,6 +10,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
 import java.security.KeyStore
@@ -103,7 +104,14 @@ class Api(private val server: String, private val token: String) {
         val response = client.newCall(request).execute()
         if (!response.isSuccessful) {
             val content = response.body?.string().orEmpty()
-            val detail = try { JSONObject(content).opt("detail")?.toString() ?: "Request failed" } catch (_: Exception) { "Request failed" }
+            val detail = try {
+                when (val value = JSONObject(content).opt("detail")) {
+                    is JSONArray -> (0 until value.length()).joinToString("; ") { value.optJSONObject(it)?.optString("msg") ?: "Invalid value" }
+                    is JSONObject -> value.optString("message", "Request failed")
+                    null -> "Request failed"
+                    else -> value.toString()
+                }
+            } catch (_: Exception) { "Request failed" }
             val code = response.code
             response.close()
             throw ApiException(detail, code)

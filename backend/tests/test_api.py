@@ -11,7 +11,8 @@ from app.security import decrypt
 
 def test_authentication_and_logout(client, signup):
     assert client.get("/api/dashboard").status_code == 401
-    assert client.post("/api/auth/register", json={"email": "x@example.com", "password": "short"}).status_code == 422
+    invalid = client.post("/api/auth/register", json={"email": "x@example.com", "password": "bad_pw_9"})
+    assert invalid.status_code == 422 and "bad_pw_9" not in invalid.text
     headers = signup()
     assert client.get("/api/auth/me", headers=headers).json()["email"] == "user@example.com"
     assert client.post("/api/auth/login", json={"email": "user@example.com", "password": "wrong"}).status_code == 401
@@ -193,3 +194,27 @@ def test_expired_google_credentials_and_remote_error_are_safe(client, signup, ad
     assert "secret-refresh" not in result.text and "secret-access" not in result.text
     invalid = client.post("/api/files/folders", json={"account_id": account.id, "name": "x", "parent_id": "../../bad"}, headers=headers)
     assert invalid.status_code == 400
+
+
+def test_checksum_mismatch_is_preserved_and_never_retried(client, signup, add_account, fake):
+    headers = signup(); source = add_account(headers, "source@example.com"); target = add_account(headers, "target@example.com")
+    fake.add_file(source, "original", "document.bin", b"verify this")
+    fake.corrupt_checksum = True
+    response = client.post("/api/transfers/copy", json={"source_account_id": source.id, "source_file_id": "original", "destination_account_id": target.id, "idempotency_key": "checksum"}, headers=headers)
+    assert response.status_code == 201
+    transfer_id = response.json()["id"]
+    transfer = client.get(f"/api/transfers/{transfer_id}", headers=headers).json()
+    assert transfer["status"] == "failed" and transfer["checksum_verified"] is False
+    assert "Checksum mismatch" in transfer["error"] and transfer["result_file_id"]
+    assert client.post(f"/api/transfers/{transfer_id}/retry", headers=headers).status_code == 409
+
+
+def test_copy_streams_multiple_chunks_and_tracks_progress(client, signup, add_account, fake):
+    headers = signup(); source = add_account(headers, "source@example.com"); target = add_account(headers, "target@example.com")
+    data = b"x" * (4 * 1024 * 1024) + b"last"
+    fake.add_file(source, "large_file", "large.bin", data, mime="application/octet-stream")
+    response = client.post("/api/transfers/copy", json={"source_account_id": source.id, "source_file_id": "large_file", "destination_account_id": target.id, "idempotency_key": "multichunk"}, headers=headers)
+    assert response.status_code == 201
+    transfer = client.get(f"/api/transfers/{response.json()['id']}", headers=headers).json()
+    assert transfer["status"] == "completed" and transfer["bytes_transferred"] == len(data)
+    assert transfer["checksum_verified"] is True and fake.items[target.id][transfer["result_file_id"]]["data"] == data

@@ -125,13 +125,14 @@ export default function App() {
     });
   };
   const refreshAccounts = () => void perform(async () => {
-    await request(token, '/api/accounts/refresh', { method: 'POST' }); await loadOverview(); setNotice('Storage quotas refreshed from Google Drive.');
+    const refreshed = await request<Account[]>(token, '/api/accounts/refresh', { method: 'POST' }); await loadOverview();
+    setNotice(refreshed.length ? 'Storage quotas refreshed from Google Drive.' : 'Connect a Google account before refreshing quotas.');
   });
   const syncFiles = () => void perform(async () => {
     const result = await request<{ accounts: { error: string | null }[] }>(token, '/api/files/sync', { method: 'POST' });
     await Promise.all([loadFiles(), loadOverview()]);
     const failures = result.accounts.filter(a => a.error).map(a => a.error).join('; ');
-    setNotice(failures ? `Some accounts could not refresh: ${failures}` : 'Files refreshed from Google Drive.');
+    setNotice(!result.accounts.length ? 'Connect a Google account before refreshing files.' : failures ? `Some accounts could not refresh: ${failures}` : 'Files refreshed from Google Drive.');
   });
   const disconnect = (account: Account) => {
     if (!window.confirm(`Disconnect ${account.email}? Your files will remain in Google Drive.`)) return;

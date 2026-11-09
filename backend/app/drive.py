@@ -45,6 +45,16 @@ def valid_session_url(url: str) -> str:
     return url
 
 
+def _read_object(response: httpx.Response) -> dict:
+    try:
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object")
+        return data
+    except (ValueError, TypeError) as exc:
+        raise DriveFailure(502, "Google returned an invalid response") from exc
+
+
 def _error(response: httpx.Response) -> DriveFailure:
     if response.status_code == 401:
         return DriveFailure(424, "Google authorization expired; reconnect this account")
@@ -96,11 +106,17 @@ class GoogleDrive:
                 self.db.commit()
                 raise DriveFailure(424, "Google authorization was revoked or expired; reconnect this account")
             raise DriveFailure(502, "Google authorization refresh failed")
-        data = response.json()
-        if not data.get("access_token"):
+        data = _read_object(response)
+        if not isinstance(data.get("access_token"), str) or not data["access_token"]:
             raise DriveFailure(502, "Google returned an invalid authorization response")
+        try:
+            expires_in = int(data.get("expires_in", 3600))
+            if not 0 < expires_in <= 86400:
+                raise ValueError("Invalid expiry")
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise DriveFailure(502, "Google returned an invalid authorization response") from exc
         self.account.access_token_enc = encrypt(data["access_token"])
-        self.account.access_expires_at = utcnow() + timedelta(seconds=int(data.get("expires_in", 3600)))
+        self.account.access_expires_at = utcnow() + timedelta(seconds=expires_in)
         self.db.commit()
         return data["access_token"]
 
@@ -123,31 +139,34 @@ class GoogleDrive:
         return response
 
     def quota(self) -> dict:
-        data = self.request("GET", "/about", params={"fields": "storageQuota,user(emailAddress)"}).json()
+        data = _read_object(self.request("GET", "/about", params={"fields": "storageQuota,user(emailAddress)"}))
         raw = data.get("storageQuota", {})
         # Drive omits limit for an unlimited quota. An omitted usage is unknown.
-        return {"limit": int(raw["limit"]) if raw.get("limit") is not None else None,
-                "usage": int(raw["usage"]) if raw.get("usage") is not None else None}
+        try:
+            return {"limit": int(raw["limit"]) if raw.get("limit") is not None else None,
+                    "usage": int(raw["usage"]) if raw.get("usage") is not None else None}
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise DriveFailure(502, "Google returned an invalid storage quota") from exc
 
     def list_page(self, page_token: str | None = None) -> dict:
         params = {"q": "trashed = false", "pageSize": 200, "spaces": "drive",
                   "fields": f"nextPageToken,files({FILE_FIELDS})"}
         if page_token:
             params["pageToken"] = page_token
-        return self.request("GET", "/files", params=params).json()
+        return _read_object(self.request("GET", "/files", params=params))
 
     def metadata(self, file_id: str) -> dict:
-        return self.request("GET", "/files/" + valid_id(file_id), params={"fields": FILE_FIELDS, "supportsAllDrives": "true"}).json()
+        return _read_object(self.request("GET", "/files/" + valid_id(file_id), params={"fields": FILE_FIELDS, "supportsAllDrives": "true"}))
 
     def create_folder(self, name: str, parent_id: str | None) -> dict:
         data = {"name": name, "mimeType": FOLDER}
         if parent_id:
             data["parents"] = [valid_id(parent_id)]
-        return self.request("POST", "/files", params={"fields": FILE_FIELDS, "supportsAllDrives": "true"}, json=data).json()
+        return _read_object(self.request("POST", "/files", params={"fields": FILE_FIELDS, "supportsAllDrives": "true"}, json=data))
 
     def rename(self, file_id: str, name: str) -> dict:
-        return self.request("PATCH", "/files/" + valid_id(file_id),
-                            params={"fields": FILE_FIELDS, "supportsAllDrives": "true"}, json={"name": name}).json()
+        return _read_object(self.request("PATCH", "/files/" + valid_id(file_id),
+                            params={"fields": FILE_FIELDS, "supportsAllDrives": "true"}, json={"name": name}))
 
     def trash(self, file_id: str) -> None:
         self.request("PATCH", "/files/" + valid_id(file_id), params={"supportsAllDrives": "true"}, json={"trashed": True})
@@ -163,7 +182,7 @@ class GoogleDrive:
             params["removeParents"] = ",".join(remove)
         if parent_id in old:
             return current
-        return self.request("PATCH", "/files/" + file_id, params=params, json={}).json()
+        return _read_object(self.request("PATCH", "/files/" + file_id, params=params, json={}))
 
     def permissions(self, file_id: str) -> list[dict]:
         result = []
@@ -173,16 +192,16 @@ class GoogleDrive:
                       "pageSize": 100, "supportsAllDrives": "true"}
             if page:
                 params["pageToken"] = page
-            data = self.request("GET", "/files/" + valid_id(file_id) + "/permissions", params=params).json()
+            data = _read_object(self.request("GET", "/files/" + valid_id(file_id) + "/permissions", params=params))
             result.extend(data.get("permissions", []))
             page = data.get("nextPageToken")
             if not page:
                 return result
 
     def public_link(self, file_id: str) -> dict:
-        return self.request("POST", "/files/" + valid_id(file_id) + "/permissions",
+        return _read_object(self.request("POST", "/files/" + valid_id(file_id) + "/permissions",
                             params={"fields": "id,type,role,allowFileDiscovery", "supportsAllDrives": "true"},
-                            json={"type": "anyone", "role": "reader", "allowFileDiscovery": False}).json()
+                            json={"type": "anyone", "role": "reader", "allowFileDiscovery": False}))
 
     def revoke_permission(self, file_id: str, permission_id: str) -> None:
         self.request("DELETE", "/files/" + valid_id(file_id) + "/permissions/" + valid_id(permission_id),
@@ -240,10 +259,7 @@ class GoogleDrive:
                 raise DriveFailure(502, "Google returned an invalid upload offset")
             return {"offset": offset, "done": False}
         if response.status_code in (200, 201):
-            try:
-                data = response.json()
-            except ValueError as exc:
-                raise DriveFailure(502, "Google returned an invalid upload result") from exc
+            data = _read_object(response)
             return {"offset": total, "done": True, "file": data}
         raise _error(response)
 

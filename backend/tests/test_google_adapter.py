@@ -63,3 +63,18 @@ def test_oauth_rejects_unverified_google_email_and_missing_scope(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         oauth.exchange_code("code", "verifier")
     assert exc.value.status_code == 400
+
+
+def test_malformed_google_responses_are_sanitized(client, signup, add_account, monkeypatch):
+    account = add_account(signup())
+    with SessionLocal() as db:
+        a = db.get(Account, account.id)
+        google = drive.GoogleDrive(db, a)
+        monkeypatch.setattr(google, "request", lambda *args, **kwargs: httpx.Response(200, json={"storageQuota": {"usage": "not-a-number"}}))
+        with pytest.raises(drive.DriveFailure) as exc:
+            google.quota()
+        assert exc.value.status == 502 and "not-a-number" not in exc.value.message
+    monkeypatch.setattr(oauth.httpx, "post", lambda *args, **kwargs: httpx.Response(200, content=b"not json"))
+    with pytest.raises(HTTPException) as exc:
+        oauth.exchange_code("code", "verifier")
+    assert exc.value.status_code == 502

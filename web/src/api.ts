@@ -39,7 +39,9 @@ export async function request<T>(token: string, path: string, options: { method?
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    const detail = typeof data.detail === 'string' ? data.detail : data.detail?.message || 'Request failed';
+    const detail = typeof data.detail === 'string' ? data.detail : Array.isArray(data.detail)
+      ? data.detail.map((item: { msg?: string }) => item.msg || 'Invalid value').join('; ')
+      : data.detail?.message || 'Request failed';
     throw new ApiError(detail, response.status);
   }
   return response.status === 204 ? undefined as T : response.json();

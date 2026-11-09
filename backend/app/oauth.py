@@ -45,7 +45,7 @@ def exchange_code(code: str, verifier: str) -> tuple[dict, dict]:
         if response.status_code != 200:
             raise HTTPException(400, "Google did not accept the authorization; try connecting again")
         tokens = response.json()
-        if not tokens.get("access_token"):
+        if not isinstance(tokens, dict) or not tokens.get("access_token"):
             raise HTTPException(502, "Google returned an invalid authorization response")
         scopes = tokens.get("scope")
         if scopes and SCOPES[-1] not in scopes.split():
@@ -55,11 +55,13 @@ def exchange_code(code: str, verifier: str) -> tuple[dict, dict]:
         if profile_response.status_code != 200:
             raise HTTPException(502, "Could not verify the Google account identity")
         profile = profile_response.json()
-        if not profile.get("sub") or not profile.get("email") or profile.get("email_verified") is not True:
+        if not isinstance(profile, dict) or not profile.get("sub") or not profile.get("email") or profile.get("email_verified") is not True:
             raise HTTPException(400, "Google did not provide a verified account email")
         return tokens, profile
     except httpx.HTTPError as exc:
         raise HTTPException(502, "Unable to reach Google authorization services") from exc
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(502, "Google returned an invalid authorization response") from exc
 
 
 def finish_oauth(db: Session, state: str, code: str) -> Account:
@@ -84,7 +86,13 @@ def finish_oauth(db: Session, state: str, code: str) -> Account:
         account.refresh_token_enc = encrypt(refresh)
     account.email = profile["email"]
     account.access_token_enc = encrypt(tokens["access_token"])
-    account.access_expires_at = utcnow() + timedelta(seconds=int(tokens.get("expires_in", 3600)))
+    try:
+        expires_in = int(tokens.get("expires_in", 3600))
+        if not 0 < expires_in <= 86400:
+            raise ValueError("Invalid expiry")
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise HTTPException(502, "Google returned an invalid authorization response") from exc
+    account.access_expires_at = utcnow() + timedelta(seconds=expires_in)
     account.reauth_required = False
     db.commit()
     db.refresh(account)

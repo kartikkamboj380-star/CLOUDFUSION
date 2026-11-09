@@ -132,7 +132,7 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
             list to JSONObject(api.request("/api/dashboard"))
         }
         accounts = result.first; dashboard = result.second
-        if (remote) notice = "Account quotas refreshed."
+        if (remote) notice = if (accounts.isEmpty()) "Connect a Google account before refreshing quotas." else "Account quotas refreshed."
     }
 
     fun connectAccount(open: (Uri) -> Unit) = launch {
@@ -160,8 +160,13 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
         files = if (more) files + items else items
         nextOffset = if (result.first.isNull("next_offset")) null else result.first.optInt("next_offset")
         result.second?.let { synced ->
-            val failures = synced.getJSONArray("accounts").objects().mapNotNull { it.text("error") }
-            notice = if (failures.isEmpty()) "Files refreshed from Google Drive." else "Some accounts could not refresh: ${failures.joinToString()}"
+            val refreshed = synced.getJSONArray("accounts").objects()
+            val failures = refreshed.mapNotNull { it.text("error") }
+            notice = when {
+                refreshed.isEmpty() -> "Connect a Google account before refreshing files."
+                failures.isEmpty() -> "Files refreshed from Google Drive."
+                else -> "Some accounts could not refresh: ${failures.joinToString()}"
+            }
         }
     }
 

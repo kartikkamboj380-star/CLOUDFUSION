@@ -17,3 +17,16 @@ describe('external links', () => {
     expect(googleDriveLink('https://drive.google.com/file/d/abc')).toBeTruthy();
   });
 });
+
+describe('API validation errors', () => {
+  it('shows a safe validation message without returning submitted input', async () => {
+    const { request } = await import('./api');
+    const original = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ detail: [{ msg: 'Password must be longer' }] }), { status: 422 });
+    try {
+      await expect(request('', '/api/auth/register', { method: 'POST', json: { password: 'not-valid' } })).rejects.toThrow('Password must be longer');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
